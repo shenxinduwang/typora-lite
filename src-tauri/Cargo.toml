@@ -1,0 +1,19 @@
+[package]
+name = "typora-lite"
+version = "0.2.2"
+description = "Native lightweight Typora-like Markdown editor for Windows"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+encoding_rs = "0.8"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

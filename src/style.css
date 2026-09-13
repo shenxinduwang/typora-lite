@@ -1,0 +1,242 @@
+* {
+  box-sizing: border-box;
+}
+
+/* ---- 主题变量：亮色默认；暗色由 html[data-theme=dark] 控制（JS 依据设置或系统偏好切换）---- */
+:root {
+  --md-bg: #fbfbfb;
+  --md-text: #1f2328;
+  --md-muted: #6b7280;
+  --md-border: #d0d7de;
+  --md-code-bg: rgba(175, 184, 193, 0.28);
+  --md-codeblock-bg: rgba(175, 184, 193, 0.18);
+  --md-link: #0969da;
+  --md-accent: #6b7280;
+  --md-selection: rgba(9, 105, 218, 0.18);
+  --ui-bg: #f2f3f5;
+  --ui-border: #e3e5e8;
+  --ui-btn-bg: #ffffff;
+  --ui-btn-border: #d8dade;
+  --ui-btn-hover: #eef1f4;
+  color-scheme: light;
+}
+
+/* ---- 暗色：跟随 data-theme（auto 模式由 JS 监听系统偏好后写入）---- */
+:root[data-theme="dark"] {
+    --md-bg: #1c1f24;
+    --md-text: #e6edf3;
+    --md-muted: #8b949e;
+    --md-border: #30363d;
+    --md-code-bg: rgba(110, 118, 129, 0.4);
+    --md-codeblock-bg: rgba(110, 118, 129, 0.22);
+    --md-link: #58a6ff;
+    --md-accent: #8b949e;
+    --md-selection: rgba(56, 139, 253, 0.3);
+    --ui-bg: #16191d;
+    --ui-border: #262a30;
+    --ui-btn-bg: #23272d;
+    --ui-btn-border: #30363d;
+    --ui-btn-hover: #2c3138;
+    color-scheme: dark;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--md-bg);
+  color: var(--md-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 12px;
+  background: var(--ui-bg);
+  border-bottom: 1px solid var(--ui-border);
+  user-select: none;
+  flex: 0 0 auto;
+}
+
+#toolbar .muted {
+  color: var(--md-muted);
+  font-size: 13px;
+}
+
+#toolbar .spacer {
+  flex: 1;
+}
+
+#toolbar button {
+  border: 1px solid var(--ui-btn-border);
+  background: var(--ui-btn-bg);
+  color: var(--md-text);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#toolbar button:hover {
+  background: var(--ui-btn-hover);
+}
+#toolbar button.active {
+  background: var(--md-selection);
+  border-color: var(--md-link);
+}
+
+/* ---- 最近文件下拉菜单 ---- */
+#recent-menu {
+  position: fixed;
+  min-width: 240px;
+  max-width: 460px;
+  background: var(--ui-btn-bg);
+  border: 1px solid var(--ui-btn-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+  z-index: 60;
+}
+#recent-menu.hidden {
+  display: none;
+}
+.rm-item {
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--md-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.rm-item:hover {
+  background: var(--ui-btn-hover);
+}
+.rm-empty {
+  color: var(--md-muted);
+  cursor: default;
+}
+.rm-clear {
+  border-top: 1px solid var(--ui-border);
+  margin-top: 4px;
+  padding-top: 6px;
+  color: var(--md-muted);
+}
+
+/* ---- 主区布局：大纲侧栏 + 编辑区 ---- */
+#main {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+
+/* Typora 式居中排版：编辑区限定宽度、居中 */
+#editor {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+}
+
+/* ---- 大纲侧栏（长文目录）---- */
+#outline {
+  flex: 0 0 auto;
+  width: 240px;
+  overflow: auto;
+  padding: 8px 6px 24px 6px;
+  background: var(--ui-bg);
+  border-right: 1px solid var(--ui-border);
+  user-select: none;
+}
+#outline.hidden {
+  display: none;
+}
+.ol-item {
+  padding: 3px 8px;
+  margin: 1px 0;
+  border-radius: 5px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--md-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.ol-item:hover {
+  background: var(--ui-btn-hover);
+  color: var(--md-text);
+}
+.ol-item.active {
+  background: var(--md-selection);
+  color: var(--md-text);
+}
+.ol-l1 { padding-left: 8px; font-weight: 700; }
+.ol-l2 { padding-left: 22px; font-weight: 600; }
+.ol-l3 { padding-left: 36px; }
+.ol-l4 { padding-left: 50px; }
+.ol-l5 { padding-left: 64px; }
+.ol-l6 { padding-left: 78px; }
+.ol-empty {
+  padding: 12px 8px;
+  font-size: 13px;
+  color: var(--md-muted);
+}
+
+#editor .cm-editor {
+  width: 100%;
+  max-width: 760px;
+  height: 100%;
+  outline: none;
+}
+
+#editor .cm-scroller {
+  overflow: auto;
+}
+
+#editor .cm-gutters {
+  display: none; /* 隐藏行号，更像 Typora */
+}
+/* 选区颜色由 liveMarkdown.js 的 baseTheme 写 .cm-selectionBackground
+   （drawSelection 自绘选区，原生 ::selection 不生效） */
+
+/* ---- 任务列表复选框（TaskMarker 原地渲染）---- */
+.cm-taskbox {
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  margin: 0 0.35em -0.12em 0;
+  border: 1.5px solid var(--md-muted);
+  border-radius: 3px;
+  vertical-align: middle;
+  cursor: pointer;
+  background: transparent;
+}
+.cm-taskbox.cm-checked {
+  background: var(--md-link);
+  border-color: var(--md-link);
+  position: relative;
+}
+.cm-taskbox.cm-checked::after {
+  content: "";
+  position: absolute;
+  left: 0.26em;
+  top: 0.05em;
+  width: 0.22em;
+  height: 0.5em;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* 列表符 / 表格分隔符 / 表头样式统一在 liveMarkdown.js 的 baseTheme 里定义 */

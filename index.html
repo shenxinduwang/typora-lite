@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Typora-Lite</title>
+  </head>
+  <body>
+    <div id="toolbar">
+      <span id="filename" class="muted">未命名.md</span>
+      <span class="spacer"></span>
+      <button id="btn-outline" title="大纲 (Ctrl+Shift+O)">大纲</button>
+      <button id="btn-recent" title="最近打开的文件">最近</button>
+      <button id="btn-autosave" title="每 30 秒自动保存到文件">自动保存</button>
+      <button id="btn-theme" title="切换亮/暗/跟随系统">主题</button>
+      <button id="btn-new" title="新建 (Ctrl+N)">新建</button>
+      <button id="btn-open" title="打开 (Ctrl+O)">打开</button>
+      <button id="btn-save" title="保存 (Ctrl+S)">保存</button>
+    </div>
+    <div id="main">
+      <div id="outline" class="hidden">
+        <div id="outline-list"></div>
+      </div>
+      <div id="editor"></div>
+    </div>
+    <div id="recent-menu" class="hidden"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

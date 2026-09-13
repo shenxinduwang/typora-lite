@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口默认权限：核心 + 对话框（dialog:default 已含 open/save/message/confirm）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-title",
+    "core:window:allow-destroy",
+    "dialog:default"
+  ]
+}
