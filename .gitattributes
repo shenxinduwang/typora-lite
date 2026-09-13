@@ -1,0 +1,5 @@
+# 本分支只放二进制产物，禁止任何文本归一化
+*.exe binary
+*.msi binary
+*.png binary
+*.ico binary
