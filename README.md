@@ -1,4 +1,4 @@
-# Typora-Lite — 原生 Windows 轻量 Markdown 编辑器（v0.2.2）
+# Typora-Lite — 原生 Windows 轻量 Markdown 编辑器（v0.2.3）
 
 一个对标 Typora「所见即所得 / 打字即渲染」体验，但**体积更小、冷启动更快、纯 Windows 原生**的 Markdown 编辑器骨架。
 
@@ -6,8 +6,8 @@
 
 | 安装包 | 大小 | 下载 |
 |---|---|---|
-| **NSIS 安装器（推荐）** | ~2.6 MB | [Typora-Lite_0.2.2_x64-setup.exe](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.2_x64-setup.exe) |
-| MSI 安装包 | ~3.8 MB | [Typora-Lite_0.2.2_x64_en-US.msi](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.2_x64_en-US.msi) |
+| **NSIS 安装器（推荐）** | ~2.6 MB | [Typora-Lite_0.2.3_x64-setup.exe](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.3_x64-setup.exe) |
+| MSI 安装包 | ~3.8 MB | [Typora-Lite_0.2.3_x64_en-US.msi](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.3_x64_en-US.msi) |
 
 安装包集中放在 [`installer` 分支](https://github.com/shenxinduwang/typora-lite/tree/installer)（该分支只放二进制产物，源码在 `main` 分支）。
 
@@ -100,7 +100,7 @@ npm run tauri build  # 打包：生成 .msi / .exe 安装包（几 MB）
 - **GBK 保存保护**：文档含 GBK 无法表示的字符（emoji/生僻字）时拒绝静默写乱码，弹窗引导一键改存 UTF-8。
 - **外部重载保视图**：外部修改触发的同文件重载保留光标与滚动位置（普通 dispatch，不清撤销栈）；跨文件载入仍走整体重建。
 - **暗色全套**：查找面板、tooltip、补全框跟随主题变量，暗色下不再白底。
-- 版本 **0.2.2**（0.1.0 → 0.2.0：大纲/拖放/草稿/编码/图片/大纲侧栏/两轮审查修复；0.2.0 → 0.2.1：链接打开防命令注入、浏览器草稿恢复判脏、UTF-16 保存损坏修复、保存重入保护、图片缓存按文档隔离、Rust 单元测试；0.2.1 → 0.2.2：失败图缓存不再反复重试、启动 open-file 竞态缓冲、URL 白名单大小写对齐、图片 title 解析、拖放图 2MB 守卫、loadFile 串行化）。
+- 版本 **0.2.3**（0.1.0 → 0.2.0：大纲/拖放/草稿/编码/图片/大纲侧栏/两轮审查修复；0.2.0 → 0.2.1：链接打开防命令注入、浏览器草稿恢复判脏、UTF-16 保存损坏修复、保存重入保护、图片缓存按文档隔离、Rust 单元测试；0.2.1 → 0.2.2：失败图缓存不再反复重试、启动 open-file 竞态缓冲、URL 白名单大小写对齐、图片 title 解析、拖放图 2MB 守卫、loadFile 串行化；0.2.2 → 0.2.3：**远程 http(s) 图片直接加载**（此前被误当本地路径解析必 broken）、CSP img-src 放行 http:/https:）。
 - **代码块语法高亮**：`@codemirror/language-data` 按 fenced code 语言标签自动着色（js/py/rust/…，懒加载按需解析）。
 - **拖放 .md 打开**：把 .md/.markdown/.txt 拖进窗口即打开（Tauri 走原生 `onDragDropEvent`，浏览器走 HTML5 drop），带脏确认与编码识别。
 - **列表编辑手感**：回车自动续接列表（有序递增、任务项重置为 `[ ]`、空项回车退出、引用延续，`lang-markdown` 内建）+ `Tab`/`Shift+Tab` 列表缩进（自研 `listEditing.js`，支持多行选区）。
@@ -150,6 +150,8 @@ npm run tauri build  # 打包：生成 .msi / .exe 安装包（几 MB）
 **2026-09-13 v0.2.2 二次评审修复轮**（详见 `开发日志.md` 第 14 节）：失败图片缓存改 `has()` 判存（不再每次重绘重发注定失败的 IPC）；启动期 open-file 事件缓冲（崩溃恢复确认期间到达的载入不再被恢复分支静默覆盖）；`is_allowed_url` 大小写归一（`HTTP://` 链接不再被 Rust 端误拒）；`![alt](src "title")` 的 src 正确剥离 title；浏览器拖放图片复用 2MB data URL 守卫；`loadFile` promise 链串行化（连开请求不再互相覆盖）。修复经 code-reviewer 子代理逐行核验无回归；`cargo test` 5/5、构建全绿，0.2.2 双安装包已入交付目录。
 
 **2026-09-13 v0.2.2 真机验证轮**：0.2.2 静默安装升级成功；脚本驱动 GUI + 字节级断言全部通过——UTF-16LE 保存往返无损（`ff fe` + 合法码元，无旧 bug 特征）、GBK 粘 emoji 转存 UTF-8 全流程（确认框 Enter 后 `f0 9f 98 80` 完整落盘）、强杀崩溃 → 草稿恢复 → 恢复内容判脏（标题 `•`）、干净退出/两步放弃退出/无参数恢复最近文档均正常。本机已装 0.2.2。
+
+**2026-09-14 v0.2.3 网络图片修复轮**（详见 `开发日志.md` 第 15 节）：外部评审发现知乎等外部文档的 `https://` 远程图片全部 broken——`toDOM` 把带协议 URL 误当本地路径丢给 `read_asset_base64` 必失败。修复：远程 src 直接交给 WebView 加载 + CSP `img-src` 放行 `http:/https:`。真机经 WebView2 CDP 远程调试断言：本地 HTTP 服务图命中服务端日志、知乎图加载成功、**用户真实知乎文档 19 个图片实例 19 ok / 0 broken**、相对路径本地图片回归通过。版本 0.2.3 已入交付目录，本机已装。
 
 ## 许可与第三方组件
 

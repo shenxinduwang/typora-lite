@@ -134,6 +134,11 @@ class ImageWidget extends WidgetType {
     el.title = this.title;
     if (this.src.startsWith("data:")) {
       el.src = this.src;
+    } else if (/^https?:\/\//i.test(this.src)) {
+      // 远程图片：带协议的 URL 不是本地路径，丢给 read_asset_base64 做路径
+      // 解析必失败 → broken 虚线框。直接交给 WebView 加载（CSP img-src 已
+      // 放行 http:/https:），重复渲染由浏览器 HTTP 缓存兜住，不进本地缓存
+      el.src = this.src;
     } else {
       const key = imageCacheKey(
         imagePathResolver ? imagePathResolver() : null,
