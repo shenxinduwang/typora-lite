@@ -150,3 +150,12 @@ npm run tauri build  # 打包：生成 .msi / .exe 安装包（几 MB）
 **2026-09-13 v0.2.2 二次评审修复轮**（详见 `开发日志.md` 第 14 节）：失败图片缓存改 `has()` 判存（不再每次重绘重发注定失败的 IPC）；启动期 open-file 事件缓冲（崩溃恢复确认期间到达的载入不再被恢复分支静默覆盖）；`is_allowed_url` 大小写归一（`HTTP://` 链接不再被 Rust 端误拒）；`![alt](src "title")` 的 src 正确剥离 title；浏览器拖放图片复用 2MB data URL 守卫；`loadFile` promise 链串行化（连开请求不再互相覆盖）。修复经 code-reviewer 子代理逐行核验无回归；`cargo test` 5/5、构建全绿，0.2.2 双安装包已入交付目录。
 
 **2026-09-13 v0.2.2 真机验证轮**：0.2.2 静默安装升级成功；脚本驱动 GUI + 字节级断言全部通过——UTF-16LE 保存往返无损（`ff fe` + 合法码元，无旧 bug 特征）、GBK 粘 emoji 转存 UTF-8 全流程（确认框 Enter 后 `f0 9f 98 80` 完整落盘）、强杀崩溃 → 草稿恢复 → 恢复内容判脏（标题 `•`）、干净退出/两步放弃退出/无参数恢复最近文档均正常。本机已装 0.2.2。
+
+## 许可与第三方组件
+
+- **本项目自身代码：MIT License**，见 [`LICENSE`](LICENSE)。
+- **第三方组件**：267 个依赖（npm 生产依赖 53 个 + 进入 Windows 产物的 Rust crate 214 个）的完整清单、按许可证分组的出处、以及每份许可证全文，见 [`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt)。全部为宽松或弱 copyleft 许可（MIT / Apache-2.0 / BSD-3-Clause / Unicode-3.0 / Unlicense / 0BSD / CC0-1.0 / Zlib / MPL-2.0），**不含 GPL / AGPL 等强 copyleft 依赖**。
+  - 其中 4 个 crate 为 MPL-2.0（`cssparser` / `selectors` / `dtoa-short` / `option-ext`）。MPL-2.0 是文件级 copyleft：仅当修改了这些文件本身才需要回馈其源码；本项目未做修改，按 NOTICES 保留其许可声明与出处即可。
+  - 依赖变动后重新生成：`cargo tree --format "{p}|{l}"`（取真正进入产物的 normal 依赖及其许可证）配合 `npm ls --omit=dev --all --parseable`（生产依赖）汇总。
+- **WebView2 运行时**：安装包不捆绑、不再分发微软的 WebView2 运行时——NSIS 安装器在目标机缺失该运行时会从微软服务器联网获取，因此该运行时适用微软自身的许可条款。
+- **应用图标**：`app-icon.png` 由 AI 生成工具制作。替换图标请改这张源图后重跑 `npx tauri icon app-icon.png` 重新生成 `src-tauri/icons/`。
