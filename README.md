@@ -2,19 +2,23 @@
 
 本分支**只放编译好的二进制产物**，源码与文档在 [`main` 分支](https://github.com/shenxinduwang/typora-lite)。
 
-## 最新版本：v0.2.2
+## 最新版本：v0.2.3
 
 | 文件 | 大小 | SHA-256 |
 |---|---|---|
-| `Typora-Lite_0.2.2_x64-setup.exe`（NSIS，推荐） | 2,716,097 B (2.59 MiB) | `c0b3fe24aeacd3987f2dcecbbb9447d197e59baf526342c6d019412f43478725` |
-| `Typora-Lite_0.2.2_x64_en-US.msi` | 3,801,088 B (3.63 MiB) | `bdc0542e739016f45a06c51d192eb5c96ea2caa54946c6d36ae7d5c1ff788060` |
+| `Typora-Lite_0.2.3_x64-setup.exe`（NSIS，推荐） | 2,719,120 B (2.59 MiB) | `63251fdc3a465f9678a7a7a69d865143cb91221260e85a90a429723c942e8fff` |
+| `Typora-Lite_0.2.3_x64_en-US.msi` | 3,805,184 B (3.63 MiB) | `86c01d0bf4c5cda4c01a26eb8a26afc531ddcaeca46e9b48a1e5a0caff8ff7f0` |
 
 直链下载：
 
-- NSIS 安装器：<https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.2_x64-setup.exe>
-- MSI 安装包：<https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.2_x64_en-US.msi>
+- NSIS 安装器：<https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.3_x64-setup.exe>
+- MSI 安装包：<https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.2.3_x64_en-US.msi>
 
 或直接浏览本分支根目录取最新文件。
+
+## 本版变更（0.2.2 → 0.2.3）
+
+**修复远程图片一直显示 broken**：文档里 `![x](https://…)` 形式的 http(s) 远程图片此前被误当成同目录的本地文件去解析（`doc_dir` 拼接带协议的 URL 必然失败，且失败结果被缓存），现已改为直接交给 WebView 加载，同时放行 CSP 的 `img-src`。本地图片与相对路径图片不受影响。
 
 ## 安装说明
 
@@ -25,13 +29,13 @@
 - **校验下载完整性**（PowerShell / cmd）：
 
   ```bat
-  certutil -hashfile Typora-Lite_0.2.2_x64-setup.exe SHA256
+  certutil -hashfile Typora-Lite_0.2.3_x64-setup.exe SHA256
   ```
 
   输出应与上表 SHA-256 一致。
 
 ## 版本策略
 
-本分支只保留**最新一版**产物，避免仓库体积膨胀。历史版本（v0.1.0 / v0.2.0 / v0.2.1）未上传，需要旧版请按 `main` 分支的构建步骤自行编译。
+本分支只保留**最新一版**产物，避免仓库体积膨胀。v0.2.2 的产物在上一提交（`38b1052`）中可查；v0.1.0 / v0.2.0 / v0.2.1 未上传，需要旧版请按 `main` 分支的构建步骤自行编译。
 
 安装包由 `cargo tauri build` 生成，构建步骤见 `main` 分支 README 的「开发与打包」一节。
