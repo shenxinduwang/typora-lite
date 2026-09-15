@@ -3,3 +3,6 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 *.local
+
+# 构建 / 开发日志：内容含构建机绝对路径，不进仓库
+*.log

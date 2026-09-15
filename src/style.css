@@ -4,12 +4,22 @@
 
 /* ---- 主题变量：亮色默认；暗色由 html[data-theme=dark] 控制（JS 依据设置或系统偏好切换）---- */
 :root {
-  --md-bg: #fbfbfb;
+  /* P0-6：内容区纯白，侧栏/顶栏保持浅灰，靠色差区分区域而不是内容区自己变灰 */
+  --md-bg: #ffffff;
   --md-text: #1f2328;
   --md-muted: #6b7280;
   --md-border: #d0d7de;
   --md-code-bg: rgba(175, 184, 193, 0.28);
-  --md-codeblock-bg: rgba(175, 184, 193, 0.18);
+  /* 代码块容器：ima 实测 #F6F6F6 头部条 + #FFFFFF 代码区 + #EBEBEB 描边 */
+  --md-codeblock-bg: #ffffff;
+  --md-codeblock-head-bg: #f6f7f8;
+  --md-codeblock-border: #ebebeb;
+  --md-quote-bg: rgba(175, 184, 193, 0.18);
+  /* 表格 block widget（P2-1 方案 A）：边框/表头底/斑马纹/hover */
+  --md-table-border: #e3e5e8;
+  --md-table-head-bg: #f6f7f8;
+  --md-table-row-alt: rgba(175, 184, 193, 0.12);
+  --md-table-row-hover: rgba(9, 105, 218, 0.06);
   --md-link: #0969da;
   --md-accent: #6b7280;
   --md-selection: rgba(9, 105, 218, 0.18);
@@ -28,7 +38,15 @@
     --md-muted: #8b949e;
     --md-border: #30363d;
     --md-code-bg: rgba(110, 118, 129, 0.4);
-    --md-codeblock-bg: rgba(110, 118, 129, 0.22);
+    /* 暗色下代码块容器用实色分层（头部条比代码区亮一档），与亮色同一套变量名 */
+    --md-codeblock-bg: #23282e;
+    --md-codeblock-head-bg: #262c33;
+    --md-codeblock-border: #30363d;
+    --md-quote-bg: rgba(110, 118, 129, 0.18);
+    --md-table-border: #30363d;
+    --md-table-head-bg: #262c33;
+    --md-table-row-alt: rgba(110, 118, 129, 0.1);
+    --md-table-row-hover: rgba(56, 139, 253, 0.1);
     --md-link: #58a6ff;
     --md-accent: #8b949e;
     --md-selection: rgba(56, 139, 253, 0.3);
@@ -46,7 +64,6 @@ body {
   height: 100%;
   background: var(--md-bg);
   color: var(--md-text);
-  -webkit-font-smoothing: antialiased;
 }
 
 body {
@@ -57,44 +74,65 @@ body {
 #toolbar {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   height: 40px;
-  padding: 0 12px;
+  padding: 0 10px;
   background: var(--ui-bg);
   border-bottom: 1px solid var(--ui-border);
   user-select: none;
   flex: 0 0 auto;
 }
 
-#toolbar .muted {
+/* P0-8：文件名顶部居中 */
+#filename {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
   color: var(--md-muted);
   font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-#toolbar .spacer {
-  flex: 1;
+.tb-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
 }
 
-#toolbar button {
-  border: 1px solid var(--ui-btn-border);
-  background: var(--ui-btn-bg);
-  color: var(--md-text);
+/* P0-8：无边框图标按钮，hover 才出底色 */
+.tb-btn {
+  border: none;
+  background: transparent;
+  color: var(--md-muted);
+  width: 30px;
+  height: 28px;
   border-radius: 6px;
-  padding: 4px 12px;
-  font-size: 13px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   cursor: pointer;
 }
-
-#toolbar button:hover {
+.tb-btn:hover {
   background: var(--ui-btn-hover);
+  color: var(--md-text);
 }
-#toolbar button.active {
+.tb-btn.active {
   background: var(--md-selection);
-  border-color: var(--md-link);
+  color: var(--md-link);
+}
+.tb-btn svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
-/* ---- 最近文件下拉菜单 ---- */
-#recent-menu {
+/* ---- 下拉菜单（最近文件 / 更多设置共用样式）---- */
+#recent-menu,
+#more-menu {
   position: fixed;
   min-width: 240px;
   max-width: 460px;
@@ -105,7 +143,8 @@ body {
   padding: 4px;
   z-index: 60;
 }
-#recent-menu.hidden {
+#recent-menu.hidden,
+#more-menu.hidden {
   display: none;
 }
 .rm-item {
@@ -151,7 +190,7 @@ body {
 /* ---- 大纲侧栏（长文目录）---- */
 #outline {
   flex: 0 0 auto;
-  width: 240px;
+  width: 260px; /* P0-7：240 → 260，配合两行截断长标题不再被吃掉 */
   overflow: auto;
   padding: 8px 6px 24px 6px;
   background: var(--ui-bg);
@@ -162,16 +201,52 @@ body {
   display: none;
 }
 .ol-item {
-  padding: 3px 8px;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 3px 8px 3px var(--ol-indent, 8px);
   margin: 1px 0;
   border-radius: 5px;
   font-size: 13px;
   line-height: 1.5;
   color: var(--md-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   cursor: pointer;
+}
+.ol-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* P0-7：单行省略号 → 最多两行截断（-webkit-line-clamp 放文本子元素上，
+     避免行内折叠箭头被 box 布局挤到独立一行） */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  word-break: break-all;
+  overflow: hidden;
+}
+.ol-caret {
+  flex: 0 0 auto;
+  width: 12px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--md-muted);
+  user-select: none;
+  cursor: pointer;
+}
+/* 层级引导线：同层相邻条目的 ::before 首尾相接，形成连续竖线；
+   层级变化处线条自然断开，呈现树形轮廓 */
+.ol-l2::before,
+.ol-l3::before,
+.ol-l4::before,
+.ol-l5::before,
+.ol-l6::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--ui-border);
+  pointer-events: none;
 }
 .ol-item:hover {
   background: var(--ui-btn-hover);
@@ -181,21 +256,42 @@ body {
   background: var(--md-selection);
   color: var(--md-text);
 }
-.ol-l1 { padding-left: 8px; font-weight: 700; }
-.ol-l2 { padding-left: 22px; font-weight: 600; }
-.ol-l3 { padding-left: 36px; }
-.ol-l4 { padding-left: 50px; }
-.ol-l5 { padding-left: 64px; }
-.ol-l6 { padding-left: 78px; }
+.ol-l1 { --ol-indent: 8px; font-weight: 700; }
+.ol-l2 { --ol-indent: 22px; --ol-guide-x: 15px; font-weight: 600; }
+.ol-l3 { --ol-indent: 36px; --ol-guide-x: 29px; }
+.ol-l4 { --ol-indent: 50px; --ol-guide-x: 43px; }
+.ol-l5 { --ol-indent: 64px; --ol-guide-x: 57px; }
+.ol-l6 { --ol-indent: 78px; --ol-guide-x: 71px; }
+.ol-l2::before { left: var(--ol-guide-x); }
+.ol-l3::before { left: var(--ol-guide-x); }
+.ol-l4::before { left: var(--ol-guide-x); }
+.ol-l5::before { left: var(--ol-guide-x); }
+.ol-l6::before { left: var(--ol-guide-x); }
 .ol-empty {
   padding: 12px 8px;
   font-size: 13px;
   color: var(--md-muted);
 }
+/* 根节点：文档名（P1-3），点击回文首 */
+.ol-root {
+  padding: 4px 8px;
+  margin: 2px 0 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--md-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.ol-root:hover {
+  background: var(--ui-btn-hover);
+  border-radius: 5px;
+}
 
 #editor .cm-editor {
   width: 100%;
-  max-width: 760px;
+  max-width: 820px; /* 820 - 2×32px 内容 padding = 文本栏宽 ≈756px，与旧 760px 基本一致 */
   height: 100%;
   outline: none;
 }
@@ -239,4 +335,77 @@ body {
   transform: rotate(45deg);
 }
 
+/* ---- 轻提示（toast）：阅读位置跳回等非阻断反馈 ---- */
+#toast {
+  position: fixed;
+  left: 50%;
+  bottom: 36px;
+  transform: translateX(-50%) translateY(8px);
+  background: var(--ui-btn-bg);
+  color: var(--md-text);
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  font-size: 13px;
+  padding: 8px 16px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  z-index: 80;
+}
+#toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
 /* 列表符 / 表格分隔符 / 表头样式统一在 liveMarkdown.js 的 baseTheme 里定义 */
+
+/* ---- 表格 block widget（TableWidget，光标不在表内时渲染真 <table>）---- */
+.cm-table {
+  /* width:100% + contain:inline-size 双保险：cm-scroller 是 flex 布局，
+     wrap 的固有宽度（宽表 max-content）会把 .cm-content 整个撑宽（编辑器
+     整体横向滚动）；inline-size 尺寸包容让固有宽度不外泄，宽表只在自身
+     内部横向滚动（overflow-x:auto） */
+  width: 100%;
+  overflow-x: auto;
+  contain: inline-size;
+  margin: 8px 0;
+}
+.cm-table table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+  line-height: 1.55;
+  min-width: 40%;
+}
+.cm-table th,
+.cm-table td {
+  border: 1px solid var(--md-table-border);
+  padding: 5px 12px;
+  text-align: left; /* 单元格级对齐由 aligns 内联覆盖（:---:/:---/---: 语法） */
+  color: var(--md-text);
+  /* 重置从 .cm-content 继承的 pre-wrap/break-word：CJK 自然换行，长 URL/
+     代码 token 不断行才能撑出横向滚动（与 Typora 行为一致） */
+  white-space: normal;
+  word-break: normal;
+  overflow-wrap: normal;
+  cursor: pointer; /* 点击进格编辑 */
+}
+.cm-table th {
+  background: var(--md-table-head-bg);
+  font-weight: 700;
+}
+/* 单元格内行内代码（`x` 渲染为 <code class=cm-cellcode>，反引号不显示） */
+.cm-table code {
+  font-family: "Cascadia Mono", ui-monospace, Consolas, "Sarasa Mono SC",
+    "JetBrains Mono", monospace;
+  font-size: 0.9em;
+  background: var(--md-code-bg);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.cm-table tbody tr:nth-child(even) {
+  background: var(--md-table-row-alt);
+}
+.cm-table tbody tr:hover {
+  background: var(--md-table-row-hover);
+}

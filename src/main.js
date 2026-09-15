@@ -9,10 +9,27 @@ import { syntaxHighlighting, defaultHighlightStyle, syntaxTree } from "@codemirr
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 
-import { liveMarkdown, baseTheme, setImagePathResolver, clearImageCache } from "./liveMarkdown.js";
+import {
+  liveMarkdown,
+  baseTheme,
+  tableWidgets,
+  setEditorViewRef,
+  setImagePathResolver,
+  clearImageCache,
+} from "./liveMarkdown.js";
 import { indentList, outdentList } from "./listEditing.js";
 import { collectOutline } from "./outline.js";
-import { loadSettings, saveSettings, loadRecent, saveRecent, loadDraft, saveDraft, clearDraft } from "./workspace.js";
+import {
+  loadSettings,
+  saveSettings,
+  loadRecent,
+  saveRecent,
+  loadDraft,
+  saveDraft,
+  clearDraft,
+  getPosition,
+  savePosition,
+} from "./workspace.js";
 import "./style.css";
 
 const IS_TAURI =
@@ -83,6 +100,9 @@ function applyLoadedText(text, path, encoding) {
   clearDraft(); // 载入的内容即当前真相，旧草稿作废（恢复草稿的流程会重新写回）
   clearImageCache(); // 换文档：图片缓存按文档隔离，避免跨目录同名 rel 串图
   refreshLabel();
+  // setState 不产生事务、不触发 updateListener 的 docChanged，换文档后大纲会停在
+  // 上一份文档的标题；大纲开着时须主动重建（rebuildOutline 内部会重算高亮）。
+  if (outlineOpen) rebuildOutline();
 }
 
 // 所有可预期的失败（文件不存在、非 UTF-8、只读盘、权限等）都要弹出来，
@@ -133,6 +153,51 @@ function queueLabel() {
   });
 }
 
+// ---- 阅读位置记忆：按文档路径存 {光标, 滚动}，载入时跳回并轻提示 ----
+// 防抖采样于调度时刻（pendingPos 记录 path+head+top）：600ms 窗口内切换文档时，
+// 定时器触发写的是"采样时的文档"，不会把新文档未布局的初始 scrollTop≈0
+// 串写进新文档存档；且换文档路径变化时先把旧文档采样立即落盘，最后位置不丢。
+let posSaveTimer = null;
+let pendingPos = null; // 最近一次采样 {path, head, top}
+function schedulePositionSave() {
+  if (!IS_TAURI || !currentPath) return;
+  if (pendingPos && pendingPos.path !== currentPath) {
+    // 已切到另一篇文档：先把旧文档的最后一次采样落盘
+    savePosition(pendingPos.path, { head: pendingPos.head, top: pendingPos.top });
+  }
+  pendingPos = {
+    path: currentPath,
+    head: view.state.selection.main.head,
+    top: Math.round(view.scrollDOM.scrollTop),
+  };
+  clearTimeout(posSaveTimer);
+  posSaveTimer = setTimeout(savePositionNow, 600);
+}
+function savePositionNow() {
+  if (!IS_TAURI) return;
+  if (pendingPos) {
+    // 只写采样时刻的文档+位置，不读"当时的 currentPath"（跨文档防串写）
+    savePosition(pendingPos.path, { head: pendingPos.head, top: pendingPos.top });
+    pendingPos = null;
+    return;
+  }
+  if (currentPath && view)
+    savePosition(currentPath, {
+      head: view.state.selection.main.head,
+      top: Math.round(view.scrollDOM.scrollTop),
+    });
+}
+
+let toastTimer = null;
+function showToast(msg) {
+  const el = document.getElementById("toast");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2400);
+}
+
 async function doLoadFile(path) {
   if (!path) return;
   // 同一个文件且没有改动：不要重新载入，避免重置光标/滚动位置
@@ -148,6 +213,25 @@ async function doLoadFile(path) {
     pushRecent(path);
     if (IS_TAURI) {
       lastKnownMtime = await invoke("file_mtime_ms", { path }).catch(() => null);
+    }
+    // 阅读位置记忆：等布局/高度图就绪后跳回（位置是建议值，一律钳制越界）。
+    // 顺序敏感：先落光标（CM 会在 selection 更新后自动滚到光标处），等两帧
+    // 布局稳定后再覆盖 scrollTop，否则滚动会被光标滚动覆盖（实测差 ~1300px）
+    const savedPos = getPosition(path);
+    if (savedPos && (savedPos.head > 0 || savedPos.top > 0)) {
+      setTimeout(() => {
+        if (currentPath !== path) return; // 期间已切走
+        const head = Math.max(0, Math.min(savedPos.head || 0, view.state.doc.length));
+        if (head > 0) view.dispatch({ selection: { anchor: head } });
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            if (currentPath !== path) return;
+            const maxTop = Math.max(0, view.scrollDOM.scrollHeight - view.scrollDOM.clientHeight);
+            if (savedPos.top) view.scrollDOM.scrollTop = Math.min(savedPos.top, maxTop);
+            showToast("已跳转到上次阅读位置");
+          })
+        );
+      }, 80);
     }
   } catch (e) {
     await showErr("打开失败", e);
@@ -265,6 +349,7 @@ async function newFile() {
   clearDraft();
   clearImageCache();
   refreshLabel();
+  if (outlineOpen) rebuildOutline(); // 同 applyLoadedText：新建后也要主动刷新大纲
   view.focus();
 }
 
@@ -281,6 +366,7 @@ async function confirmDiscard() {
 // 关窗拦截（Tauri）：干净直接放行；脏则给“保存并退出 / 放弃修改 / 取消”。
 // 保存失败（只读盘等）会留在编辑器里，不让用户以为存上了。
 async function handleCloseRequested(event) {
+  savePositionNow(); // 关窗前落盘阅读位置（无论后续是否真的退出）
   if (!isDirty()) return;
   const { confirm } = await import("@tauri-apps/plugin-dialog");
   if (
@@ -372,12 +458,66 @@ const startKeymap = keymap.of([
   { key: "Mod-Shift-o", run: () => (setOutlineOpen(!outlineOpen), true) },
 ]);
 
-// ---- 大纲侧栏：长文目录，点击跳转、跟随光标高亮当前章节 ----
+// ---- 大纲侧栏：长文目录，点击跳转、跟随光标高亮当前章节、层级折叠树（P1-3）----
 const outlinePanel = document.getElementById("outline");
 const outlineList = document.getElementById("outline-list");
 let outlineOpen = false;
 let outlineEntries = [];
+let outlineVisible = []; // 当前可见条目 [{ from, el }]，文档顺序，供高亮定位
 let outlineTimer = null;
+// 折叠状态按 level:text 记忆：rebuildOutline 全量重建 DOM 后仍能保持展开
+// （打字 500ms 防抖会触发重建，不记忆的话折叠会全弹开）
+const outlineCollapsed = new Set();
+
+// 扁平 entries → 树：按 level 降序压栈，栈顶即当前节点的父
+function buildOutlineTree(entries) {
+  const roots = [];
+  const stack = [];
+  for (const e of entries) {
+    const node = { ...e, children: [] };
+    while (stack.length && stack[stack.length - 1].level >= e.level) stack.pop();
+    (stack.length ? stack[stack.length - 1].children : roots).push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+
+function renderOutlineNode(node, container, visible) {
+  const key = `${node.level}:${node.text}`;
+  const hasKids = node.children.length > 0;
+  const collapsed = outlineCollapsed.has(key);
+  const row = document.createElement("div");
+  row.className = `ol-item ol-l${node.level}`;
+  if (hasKids) {
+    const caret = document.createElement("span");
+    caret.className = "ol-caret";
+    caret.textContent = collapsed ? "▸" : "▾";
+    caret.addEventListener("click", (ev) => {
+      ev.stopPropagation(); // 只切换折叠，不触发跳转
+      if (outlineCollapsed.has(key)) outlineCollapsed.delete(key);
+      else outlineCollapsed.add(key);
+      rebuildOutline();
+    });
+    row.appendChild(caret);
+  }
+  const label = document.createElement("span");
+  label.className = "ol-text";
+  label.textContent = node.text;
+  row.appendChild(label);
+  row.title = node.text;
+  row.addEventListener("click", () => {
+    view.dispatch({
+      selection: { anchor: node.from },
+      effects: EditorView.scrollIntoView(node.from, { y: "start", yMargin: 32 }),
+    });
+    view.focus();
+  });
+  container.appendChild(row);
+  visible.push({ from: node.from, el: row });
+  if (hasKids && !collapsed) {
+    for (const c of node.children) renderOutlineNode(c, container, visible);
+  }
+}
 
 function setOutlineOpen(open) {
   outlineOpen = open;
@@ -400,37 +540,42 @@ function rebuildOutline() {
     outlineList.appendChild(empty);
     return;
   }
-  for (const e of outlineEntries) {
-    const item = document.createElement("div");
-    item.className = `ol-item ol-l${e.level}`;
-    item.textContent = e.text;
-    item.title = e.text;
-    item.addEventListener("click", () => {
-      view.dispatch({
-        selection: { anchor: e.from },
-        effects: EditorView.scrollIntoView(e.from, { y: "start", yMargin: 32 }),
-      });
-      view.focus();
+  // 根节点：文档名，点击回到文首
+  const rootName = currentPath
+    ? currentPath.split(/[\\/]/).pop()
+    : currentBrowserName || "未命名.md";
+  const rootRow = document.createElement("div");
+  rootRow.className = "ol-root";
+  rootRow.textContent = rootName;
+  rootRow.title = rootName;
+  rootRow.addEventListener("click", () => {
+    view.dispatch({
+      selection: { anchor: 0 },
+      effects: EditorView.scrollIntoView(0, { y: "start", yMargin: 32 }),
     });
-    outlineList.appendChild(item);
+    view.focus();
+  });
+  outlineList.appendChild(rootRow);
+  const visible = [];
+  for (const root of buildOutlineTree(outlineEntries)) {
+    renderOutlineNode(root, outlineList, visible);
   }
+  outlineVisible = visible;
   updateOutlineActive(); // 条目可能变化，重建后重算高亮
 }
 
-// 只找"光标之前最近的标题"，改 class 不重建 DOM，选区变化零开销
+// 只找"光标之前最近的可见标题"，改 class 不重建 DOM，选区变化零开销
 function updateOutlineActive() {
   if (!outlineOpen) return;
   const head = view.state.selection.main.head;
   let activeIdx = -1;
-  for (let i = 0; i < outlineEntries.length; i++) {
-    if (outlineEntries[i].from <= head) activeIdx = i;
+  for (let i = 0; i < outlineVisible.length; i++) {
+    if (outlineVisible[i].from <= head) activeIdx = i;
     else break;
   }
-  [...outlineList.children].forEach((el, i) => {
-    el.classList.toggle("active", i === activeIdx);
-  });
-  const activeEl = outlineList.children[activeIdx];
-  if (activeEl) activeEl.scrollIntoView({ block: "nearest" });
+  outlineVisible.forEach((v, i) => v.el.classList.toggle("active", i === activeIdx));
+  if (outlineVisible[activeIdx])
+    outlineVisible[activeIdx].el.scrollIntoView({ block: "nearest" });
 }
 
 // 打字防抖重建大纲；ensureSyntaxTree 全文解析在 500ms 空闲后做，不卡每键
@@ -450,7 +595,9 @@ function applyTheme() {
   const mode =
     settings.theme === "auto" ? (themeMedia.matches ? "dark" : "light") : settings.theme;
   document.documentElement.dataset.theme = mode;
-  document.getElementById("btn-theme").textContent = THEME_LABELS[settings.theme];
+  // P0-8：主题入口收进「更多」菜单
+  const miTheme = document.getElementById("mi-theme");
+  if (miTheme) miTheme.textContent = THEME_LABELS[settings.theme];
 }
 
 function cycleTheme() {
@@ -552,14 +699,19 @@ const baseExtensions = [
   markdown({ extensions: GFM, codeLanguages: languages }),
   syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
   liveMarkdown,
+  tableWidgets, // 表格 block widget（StateField，block 装饰必须走状态层）
   baseTheme,
   EditorView.domEventHandlers({ mousedown: handleMouseDown, paste: handlePaste }),
   EditorView.updateListener.of((u) => {
     if (u.docChanged) {
       queueLabel();
       scheduleOutlineRebuild();
+      schedulePositionSave();
     }
-    if (u.selectionSet) updateOutlineActive();
+    if (u.selectionSet) {
+      updateOutlineActive();
+      schedulePositionSave();
+    }
   }),
   keymap.of([
     ...closeBracketsKeymap,
@@ -581,6 +733,8 @@ const view = new EditorView({
     extensions: baseExtensions,
   }),
 });
+setEditorViewRef(view); // 表格 widget 点击时反查主视图
+view.scrollDOM.addEventListener("scroll", schedulePositionSave, { passive: true }); // 滚动即记阅读位置
 
 // 点击任务列表复选框（[ ] ↔ [x]）：从被点的 widget DOM 反查精确文档位置再切换源码。
 // 关键：replace 型 widget 无文本宽度，posAtCoords 会跨行错位；posAtDOM 才可靠。
@@ -655,7 +809,24 @@ document.getElementById("btn-new").onclick = newFile;
 document.getElementById("btn-open").onclick = openFile;
 document.getElementById("btn-save").onclick = saveFile;
 document.getElementById("btn-outline").onclick = () => setOutlineOpen(!outlineOpen);
-document.getElementById("btn-theme").onclick = cycleTheme;
+
+// ---- 「更多」下拉菜单（自动保存 / 主题，P0-8 收编顶栏按钮）----
+const btnMore = document.getElementById("btn-more");
+const moreMenu = document.getElementById("more-menu");
+function toggleMoreMenu(show) {
+  const willShow = show ?? moreMenu.classList.contains("hidden");
+  if (willShow) {
+    moreMenu.classList.remove("hidden"); // 先显示才能量宽度，再右对齐到按钮
+    const rect = btnMore.getBoundingClientRect();
+    const w = moreMenu.offsetWidth || 240;
+    moreMenu.style.left = `${Math.max(8, rect.right - w)}px`;
+    moreMenu.style.top = `${rect.bottom + 6}px`;
+  } else {
+    moreMenu.classList.add("hidden");
+  }
+}
+btnMore.addEventListener("click", () => toggleMoreMenu());
+document.getElementById("mi-theme").addEventListener("click", cycleTheme);
 
 setImagePathResolver(() => currentPath); // 图片预览解析相对 assets 路径用
 applyTheme();
@@ -923,14 +1094,14 @@ function handlePaste(event) {
 
 // ---- 工具栏按钮 ----
 const btnRecent = document.getElementById("btn-recent");
-const btnAutosave = document.getElementById("btn-autosave");
+const miAutosave = document.getElementById("mi-autosave");
 if (!IS_TAURI) {
   // 最近/自动保存依赖真实文件路径，浏览器模式没有意义，直接隐藏
   btnRecent.style.display = "none";
-  btnAutosave.style.display = "none";
+  miAutosave.style.display = "none";
 } else {
   btnRecent.addEventListener("click", () => toggleRecentMenu());
-  btnAutosave.addEventListener("click", () => {
+  miAutosave.addEventListener("click", () => {
     settings.autosave = !settings.autosave;
     saveSettings(settings);
     applyAutosaveBtn();
@@ -938,8 +1109,7 @@ if (!IS_TAURI) {
   applyAutosaveBtn();
 }
 function applyAutosaveBtn() {
-  btnAutosave.textContent = settings.autosave ? "自动保存 ✓" : "自动保存";
-  btnAutosave.classList.toggle("active", settings.autosave);
+  miAutosave.textContent = settings.autosave ? "自动保存 ✓" : "自动保存";
 }
 document.addEventListener("click", (e) => {
   const menu = document.getElementById("recent-menu");
@@ -950,6 +1120,14 @@ document.addEventListener("click", (e) => {
     !btnRecent.contains(e.target)
   ) {
     toggleRecentMenu(false);
+  }
+  if (
+    !moreMenu.classList.contains("hidden") &&
+    !moreMenu.contains(e.target) &&
+    e.target !== btnMore &&
+    !btnMore.contains(e.target)
+  ) {
+    toggleMoreMenu(false);
   }
 });
 

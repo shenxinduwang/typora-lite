@@ -1,6 +1,6 @@
 [package]
 name = "typora-lite"
-version = "0.2.3"
+version = "0.3.1"
 description = "Native lightweight Typora-like Markdown editor for Windows"
 edition = "2021"
 

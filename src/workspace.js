@@ -47,3 +47,40 @@ export function saveDraft(draft) {
 export function clearDraft() {
   localStorage.removeItem(DRAFT_KEY);
 }
+
+// ---- 阅读位置记忆（按文档路径存 {head, top}，LRU 上限 50 篇）----
+const POS_KEY = "tl-positions";
+const POS_LIMIT = 50;
+
+export function loadPositions() {
+  try {
+    return JSON.parse(localStorage.getItem(POS_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+export function getPosition(path) {
+  if (!path) return null;
+  const all = loadPositions();
+  return all[path] || null;
+}
+
+export function savePosition(path, pos) {
+  if (!path) return;
+  try {
+    const all = loadPositions();
+    all[path] = { ...pos, at: Date.now() };
+    // LRU：超出上限按最旧访问时间剔除
+    const keys = Object.keys(all);
+    if (keys.length > POS_LIMIT) {
+      keys
+        .sort((a, b) => (all[a].at || 0) - (all[b].at || 0))
+        .slice(0, keys.length - POS_LIMIT)
+        .forEach((k) => delete all[k]);
+    }
+    localStorage.setItem(POS_KEY, JSON.stringify(all));
+  } catch {
+    /* 配额超限，静默放弃 */
+  }
+}
