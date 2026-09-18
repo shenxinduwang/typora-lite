@@ -4,7 +4,12 @@ const SETTINGS_KEY = "tl-settings";
 const RECENT_KEY = "tl-recent";
 const DRAFT_KEY = "tl-draft";
 
-const DEFAULT_SETTINGS = { theme: "auto", autosave: false };
+const DEFAULT_SETTINGS = {
+  theme: "auto",
+  autosave: false,
+  // 实验室开关（借鉴 Telari 0.5.4）：txtPlain=.txt 打开即纯文本读，emphasisDot=^^着重号^^
+  lab: { txtPlain: true, emphasisDot: false },
+};
 
 export function loadSettings() {
   try {

@@ -130,9 +130,10 @@ body {
   display: block;
 }
 
-/* ---- 下拉菜单（最近文件 / 更多设置共用样式）---- */
+/* ---- 下拉菜单（最近文件 / 更多设置 / 实验室共用样式）---- */
 #recent-menu,
-#more-menu {
+#more-menu,
+#lab-menu {
   position: fixed;
   min-width: 240px;
   max-width: 460px;
@@ -144,7 +145,8 @@ body {
   z-index: 60;
 }
 #recent-menu.hidden,
-#more-menu.hidden {
+#more-menu.hidden,
+#lab-menu.hidden {
   display: none;
 }
 .rm-item {

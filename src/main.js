@@ -5,20 +5,23 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { markdown } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown"; // 表格 / 删除线 / 任务列表 / 自动链接
 import { languages } from "@codemirror/language-data"; // 代码块按语言标签着色（懒加载）
-import { syntaxHighlighting, defaultHighlightStyle, syntaxTree } from "@codemirror/language";
+import { syntaxHighlighting, defaultHighlightStyle, syntaxTree, ensureSyntaxTree } from "@codemirror/language";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { search, searchKeymap, highlightSelectionMatches } from "@codemirror/search";
 
 import {
   liveMarkdown,
   baseTheme,
+  tableEdgeStickyField,
   tableWidgets,
   setEditorViewRef,
   setImagePathResolver,
   clearImageCache,
+  setLabFlags,
 } from "./liveMarkdown.js";
 import { indentList, outdentList } from "./listEditing.js";
 import { collectOutline } from "./outline.js";
+import { tidyText } from "./tidy.js";
 import {
   loadSettings,
   saveSettings,
@@ -87,22 +90,42 @@ function isDirty() {
   return docText() !== lastSavedNorm;
 }
 
+// .txt 纯文本模式（T-3 实验项）：lab.txtPlain 开启时，.txt 文档不挂
+// liveMarkdown 装饰，按原始文本渲染。依据文件名推导，不做正交开关。
+function isPlainDoc(name) {
+  return !!(settings.lab && settings.lab.txtPlain && /\.txt$/i.test(name || ""));
+}
+
 // 统一的文档载入入口：整体重建编辑器状态。
 // 必须用 setState 而不是 dispatch 换文本——后者会记进撤销历史，
 // Ctrl+Z 能一路“撤销回上一个文件”，窗口路径与实际内容就错位了。
-function applyLoadedText(text, path, encoding) {
+// nameHint：浏览器模式没有路径，用 File.name 判断 .txt。
+function applyLoadedText(text, path, encoding, nameHint) {
   originalEncoding = encoding || "utf8";
   originalEolCRLF = text.includes("\r\n");
   currentPath = path;
   if (path) currentBrowserName = null;
   lastSavedNorm = normEol(text);
-  view.setState(EditorState.create({ doc: text, extensions: baseExtensions }));
+  const plain = isPlainDoc(path ? path.split(/[\\/]/).pop() : nameHint);
+  view.setState(
+    EditorState.create({
+      doc: text,
+      extensions: plain ? plainExtensions : baseExtensions,
+    })
+  );
+  docPlain = plain;
   clearDraft(); // 载入的内容即当前真相，旧草稿作废（恢复草稿的流程会重新写回）
   clearImageCache(); // 换文档：图片缓存按文档隔离，避免跨目录同名 rel 串图
   refreshLabel();
-  // setState 不产生事务、不触发 updateListener 的 docChanged，换文档后大纲会停在
-  // 上一份文档的标题；大纲开着时须主动重建（rebuildOutline 内部会重算高亮）。
+  // setState 不产生事务：ViewUpdate.docChanged = !changes.empty，而 changes 只由
+  // transactions 合成，换文档时事务数组为空 → updateListener 的 docChanged 分支
+  // 不会跑。大纲开着时须主动重建，否则目录停在上一份文档的标题（rebuildOutline
+  // 内部会重算高亮）。
   if (outlineOpen) rebuildOutline();
+  // T-1：GBK 是解码链里唯一的"猜"（BOM/严格 UTF-8 都是确证），必须告知
+  if (encoding === "gbk") {
+    showToast("编码未标明，已按 GBK 打开（保存时保持原编码）");
+  }
 }
 
 // 所有可预期的失败（文件不存在、非 UTF-8、只读盘、权限等）都要弹出来，
@@ -264,7 +287,7 @@ async function openFile() {
     if (!(await confirmDiscard())) return;
     const picked = await pickBrowserFile();
     if (!picked) return;
-    applyLoadedText(picked.text, null, picked.encoding);
+    applyLoadedText(picked.text, null, picked.encoding, picked.name);
     currentBrowserName = picked.name;
     refreshLabel();
   } catch (e) {
@@ -346,6 +369,7 @@ async function newFile() {
   originalEolCRLF = false;
   originalEncoding = "utf8";
   view.setState(EditorState.create({ doc: "", extensions: baseExtensions }));
+  docPlain = false;
   clearDraft();
   clearImageCache();
   refreshLabel();
@@ -456,6 +480,7 @@ const startKeymap = keymap.of([
   { key: "Mod-o", run: () => (openFile(), true) },
   { key: "Mod-n", run: () => (newFile(), true) },
   { key: "Mod-Shift-o", run: () => (setOutlineOpen(!outlineOpen), true) },
+  { key: "Mod-Shift-t", run: () => (tidyDoc(), true) },
 ]);
 
 // ---- 大纲侧栏：长文目录，点击跳转、跟随光标高亮当前章节、层级折叠树（P1-3）----
@@ -610,6 +635,76 @@ themeMedia.addEventListener("change", () => {
   if (settings.theme === "auto") applyTheme();
 });
 
+// ---- 实验室（lab）标志：liveMarkdown 装饰层与 main 文档模式各持一半，启动时注入 ----
+// 默认值兜一层浅拷贝：旧版持久化设置没有 lab 字段，Object.assign 进模块默认值也成立
+setLabFlags({ txtPlain: true, emphasisDot: false, ...(settings.lab || {}) });
+
+// ---- 一键中英文排版整理（T-4，借鉴 Telari 0.5.4 排版）----
+// 保护区=整棵子树不外溢：代码/链接/图片/HTML/自动链接内部的文本既不插空格
+// 也不做标点转换（往 URL 或 code 里插空格属于破坏内容）。lezer range 是
+// [from, to)，与 tidy.js 的半开区间约定一致。
+function protectedRangesForTidy(state) {
+  // 全文整理需要完整语法树：增量解析只保证视口附近，长文档尾部可能是旧树
+  const tree = ensureSyntaxTree(state, state.doc.length, 5000) || syntaxTree(state);
+  const ranges = [];
+  tree.iterate({
+    enter(n) {
+      switch (n.name) {
+        case "FencedCode":
+        case "CodeBlock":
+        case "InlineCode":
+        case "Link":
+        case "Image":
+        case "AutoLink":
+        case "URL":
+        case "HTML":
+        case "HTMLBlock":
+          ranges.push([n.from, n.to]);
+          return false;
+      }
+    },
+  });
+  return ranges;
+}
+
+function tidyDoc() {
+  const state = view.state;
+  const text = state.doc.toString();
+  const stats = { changes: 0 };
+  const out = tidyText(text, protectedRangesForTidy(state), stats);
+  if (!stats.changes) {
+    showToast("无需整理");
+    view.focus();
+    return;
+  }
+  view.dispatch({ changes: { from: 0, to: text.length, insert: out } });
+  showToast(`已整理 ${stats.changes} 处（Ctrl+Z 可撤销）`);
+  view.focus();
+}
+
+// ---- .txt 纯文本模式（T-3）：当前状态机一半在文件名/lab 标志，一半在扩展集，
+// 用 docPlain 记住编辑器现在挂的是哪套扩展，切换时只重建真正变了模式的文档
+let docPlain = false;
+function currentDocName() {
+  return currentPath
+    ? currentPath.split(/[\\/]/).pop()
+    : currentBrowserName || "未命名.md";
+}
+function reapplyDocMode() {
+  const plain = isPlainDoc(currentDocName());
+  if (plain === docPlain) return;
+  const top = view.scrollDOM.scrollTop;
+  view.setState(
+    EditorState.create({
+      doc: docText(),
+      extensions: plain ? plainExtensions : baseExtensions,
+    })
+  );
+  docPlain = plain;
+  view.scrollDOM.scrollTop = top;
+  showToast(plain ? "纯文本模式：不渲染 Markdown" : "已恢复 Markdown 渲染");
+}
+
 // ---- 最近文件（仅 Tauri 有真实路径）----
 let recentFiles = loadRecent();
 // null = 尚未知（读取失败过）：轮询首次拿到值时先采纳，不触发"外部修改"判定
@@ -688,43 +783,61 @@ function saveDraftNow() {
 }
 
 // 编辑器扩展集提出来共用：载入/新建文件时要整体重建 EditorState（见 applyLoadedText）
-const baseExtensions = [
-  drawSelection(),
-  history(),
-  closeBrackets(),
-  // 查找/替换：面板置顶，Ctrl+F 打开、Enter/Shift+Enter 上下导航、Esc 关闭
-  search({ top: true }),
-  highlightSelectionMatches(),
-  EditorView.lineWrapping,
-  markdown({ extensions: GFM, codeLanguages: languages }),
-  syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-  liveMarkdown,
-  tableWidgets, // 表格 block widget（StateField，block 装饰必须走状态层）
-  baseTheme,
-  EditorView.domEventHandlers({ mousedown: handleMouseDown, paste: handlePaste }),
-  EditorView.updateListener.of((u) => {
-    if (u.docChanged) {
-      queueLabel();
-      scheduleOutlineRebuild();
-      schedulePositionSave();
-    }
-    if (u.selectionSet) {
-      updateOutlineActive();
-      schedulePositionSave();
-    }
-  }),
-  keymap.of([
-    ...closeBracketsKeymap,
-    ...searchKeymap,
-    // 列表 Tab/Shift+Tab 缩进（Enter 续写由 lang-markdown 内建 Prec.high 提供）
-    { key: "Tab", run: indentList },
-    { key: "S-Tab", run: outdentList },
-    ...defaultKeymap,
-    ...historyKeymap,
-    indentWithTab,
-  ]),
-  startKeymap,
-];
+const markdownExt = markdown({ extensions: GFM, codeLanguages: languages });
+// .txt 纯文本即读（实验室开关，借鉴 Telari 0.5.4）：去掉 markdown 解析与
+// 全部原地渲染扩展，只剩编辑/查找/主题——几十 MB 小说打开即读也顺便受益
+const plainExtensions = baseExtensionsCore(markdownExt, true);
+const baseExtensions = baseExtensionsCore(markdownExt, false);
+function baseExtensionsCore(mdExt, plain) {
+  const full = [
+    drawSelection(),
+    history(),
+    closeBrackets(),
+    // 查找/替换：面板置顶，Ctrl+F 打开、Enter/Shift+Enter 上下导航、Esc 关闭
+    search({ top: true }),
+    highlightSelectionMatches(),
+    EditorView.lineWrapping,
+    mdExt,
+    syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+    liveMarkdown,
+    // 表格下方紧邻空行的 Enter 补行豁免名单——必须先于 tableWidgets 注册，
+    // 使 tableWidgets.update 能读到本轮事务更新后的值
+    tableEdgeStickyField,
+    tableWidgets, // 表格 block widget（StateField，block 装饰必须走状态层）
+    baseTheme,
+    EditorView.domEventHandlers({ mousedown: handleMouseDown, paste: handlePaste }),
+    EditorView.updateListener.of((u) => {
+      if (u.docChanged) {
+        queueLabel();
+        scheduleOutlineRebuild();
+        schedulePositionSave();
+      }
+      if (u.selectionSet) {
+        updateOutlineActive();
+        schedulePositionSave();
+      }
+    }),
+    keymap.of([
+      ...closeBracketsKeymap,
+      ...searchKeymap,
+      // 列表 Tab/Shift+Tab 缩进（Enter 续写由 lang-markdown 内建 Prec.high 提供）
+      { key: "Tab", run: indentList },
+      { key: "S-Tab", run: outdentList },
+      ...defaultKeymap,
+      ...historyKeymap,
+      indentWithTab,
+    ]),
+    startKeymap,
+  ];
+  if (!plain) return full;
+  return full.filter(
+    (e) =>
+      e !== mdExt &&
+      e !== liveMarkdown &&
+      e !== tableEdgeStickyField &&
+      e !== tableWidgets
+  );
+}
 
 const view = new EditorView({
   parent: document.getElementById("editor"),
@@ -823,10 +936,53 @@ function toggleMoreMenu(show) {
     moreMenu.style.top = `${rect.bottom + 6}px`;
   } else {
     moreMenu.classList.add("hidden");
+    toggleLabMenu(false); // 「更多」收起时子菜单一并收起，不留悬空浮层
   }
 }
 btnMore.addEventListener("click", () => toggleMoreMenu());
 document.getElementById("mi-theme").addEventListener("click", cycleTheme);
+document.getElementById("mi-tidy").addEventListener("click", () => {
+  toggleMoreMenu(false);
+  tidyDoc();
+});
+
+// ---- 实验室子菜单（T-2）：浮层挂「更多」条目右侧，共用 .rm-item 样式 ----
+const miLab = document.getElementById("mi-lab");
+const labMenu = document.getElementById("lab-menu");
+function toggleLabMenu(show) {
+  const willShow = show ?? labMenu.classList.contains("hidden");
+  if (willShow) {
+    labMenu.classList.remove("hidden");
+    const rect = miLab.getBoundingClientRect();
+    const w = labMenu.offsetWidth || 240;
+    // 「更多」菜单贴右缘，子菜单向左放不下时翻到左侧（视口 8px 钳制会压住父菜单）
+    let left = rect.right + 4;
+    if (left + w > window.innerWidth - 8) left = Math.max(8, rect.left - w - 4);
+    labMenu.style.left = `${left}px`;
+    labMenu.style.top = `${rect.top}px`;
+  } else {
+    labMenu.classList.add("hidden");
+  }
+}
+miLab.addEventListener("click", () => toggleLabMenu());
+function applyLabMenu() {
+  document.getElementById("lab-txt").textContent =
+    (settings.lab.txtPlain ? "✓ " : "") + ".txt 纯文本阅读";
+  document.getElementById("lab-emdot").textContent =
+    (settings.lab.emphasisDot ? "✓ " : "") + "着重号（^^text^^）";
+}
+function toggleLabFlag(key) {
+  settings.lab[key] = !settings.lab[key];
+  saveSettings(settings);
+  setLabFlags(settings.lab);
+  applyLabMenu();
+  // labVersion 只在下一笔事务才被 ViewPlugin 对账，空事务立即触发重装饰
+  view.dispatch({});
+  if (key === "txtPlain") reapplyDocMode();
+}
+document.getElementById("lab-txt").addEventListener("click", () => toggleLabFlag("txtPlain"));
+document.getElementById("lab-emdot").addEventListener("click", () => toggleLabFlag("emphasisDot"));
+applyLabMenu();
 
 setImagePathResolver(() => currentPath); // 图片预览解析相对 assets 路径用
 applyTheme();
@@ -1124,10 +1280,18 @@ document.addEventListener("click", (e) => {
   if (
     !moreMenu.classList.contains("hidden") &&
     !moreMenu.contains(e.target) &&
+    !labMenu.contains(e.target) && // 点实验室子菜单不算「点外面」，否则父菜单先收起并连带关子菜单
     e.target !== btnMore &&
     !btnMore.contains(e.target)
   ) {
     toggleMoreMenu(false);
+  }
+  if (
+    !labMenu.classList.contains("hidden") &&
+    !labMenu.contains(e.target) &&
+    !miLab.contains(e.target)
+  ) {
+    toggleLabMenu(false);
   }
 });
 
@@ -1177,7 +1341,7 @@ if (IS_TAURI) {
     try {
       const bytes = new Uint8Array(await f.arrayBuffer());
       const { text, encoding } = decodeBrowserBytes(bytes);
-      applyLoadedText(text, null, encoding);
+      applyLoadedText(text, null, encoding, f.name);
       currentBrowserName = f.name;
       refreshLabel();
     } catch (err) {

@@ -4,5 +4,8 @@ src-tauri/target/
 src-tauri/gen/
 *.local
 
-# 构建 / 开发日志：内容含构建机绝对路径，不进仓库
+# 构建 / 开发日志：cargo/tauri 会把构建机绝对路径打成明文，不进仓库
 *.log
+
+# 本地验证脚手架（CDP 脚本等，含本机绝对路径）
+tmp-verify/

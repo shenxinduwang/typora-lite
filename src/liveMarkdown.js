@@ -7,6 +7,17 @@
 import { Decoration, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
 import { RangeSet, StateField } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
+import { findEmphasisSpans, classifyLinkHref } from "./tidy.js";
+
+// ---- 实验室开关（借鉴 Telari 0.5.4「实验室」页）----
+// main.js 启动时 setLabFlags(settings.lab) 注入；改动会 bump 版本号，
+// ViewPlugin 在下次 update 时对比版本重建装饰（不依赖 transaction 标志）。
+const lab = { txtPlain: true, emphasisDot: false };
+let labVersion = 0;
+export function setLabFlags(flags) {
+  Object.assign(lab, flags);
+  labVersion++;
+}
 
 // ---- 行内标记样式 ----
 const markStrong = Decoration.mark({ class: "cm-strong" });
@@ -16,6 +27,7 @@ const markLink = Decoration.mark({ class: "cm-link" });
 const markStrike = Decoration.mark({ class: "cm-strike" });
 const markList = Decoration.mark({ class: "cm-listmark" });
 const markTdMark = Decoration.mark({ class: "cm-td-mark" });
+const markEmDot = Decoration.mark({ class: "cm-em-dot" }); // 着重号（实验室）
 
 // ---- 任务列表复选框（把 [ ] / [x] 原地渲染成可点击方框）----
 class TaskBoxWidget extends WidgetType {
@@ -511,12 +523,73 @@ function eachLine(state, from, to, fn) {
   }
 }
 
+// 光标是否算「在表内」（是否暂缓整表 widget），StateField 与 ViewPlugin 镜像
+// 两个真源必须用同一判定，否则 widget 与子节点避让会失步。
+// 情形一：光标落在 Table 节点内（原有焦点即编辑语义）。
+// 情形二：光标停在表格紧下方第一行空行，且是「刚被文档编辑送进来」的
+// （sticky 命中）。GFM 语法树不把该行算进 Table，但在最后一行行尾按 Enter
+// 补行时光标恰好落在这里——若不豁免，整表立刻渲染成阅读 widget，敲出 "|"
+// 后表格行又吞回光标切回源码态，每加一行阅读/编辑来回弹一次（表格编辑
+// 体验 bug）。纯选区移动（点击/方向键/重启恢复光标位）不给豁免，否则光标
+// 恰好停在表格下方空行时整表永远渲染不出来。
+function caretInTable(state, heads, from, to, sticky) {
+  if (heads.some((h) => h >= from && h <= to)) return true;
+  if (sticky.size === 0) return false;
+  const belowNumber = state.doc.lineAt(to).number + 1;
+  return heads.some((h) => {
+    const line = state.doc.lineAt(h);
+    return (
+      line.number === belowNumber && !line.text.trim() && sticky.has(line.from)
+    );
+  });
+}
+
+// 文档编辑落定后，光标是否正停在某个可渲染表格紧邻下方的空行上（Enter 补行）
+function tableEdgeArrived(state) {
+  const arrived = new Set();
+  if (!state.doc.toString().includes("|")) return arrived;
+  const heads = state.selection.ranges.map((r) => r.head);
+  syntaxTree(state).iterate({
+    enter(node) {
+      if (node.name !== "Table") return;
+      if (!parseTable(state, node.node)) return;
+      const belowNumber = state.doc.lineAt(node.to).number + 1;
+      for (const h of heads) {
+        const line = state.doc.lineAt(h);
+        if (line.number === belowNumber && !line.text.trim()) {
+          arrived.add(line.from);
+          break;
+        }
+      }
+    },
+  });
+  return arrived;
+}
+
+const EMPTY_STICKY = new Set();
+
+// 豁免名单：仅在「文档变了」时重算（Enter 补行那一刻命中），任何
+// 纯选区变化立即清空——豁免只属于"编辑动作带进来的光标"
+const tableEdgeSticky = StateField.define({
+  create: () => EMPTY_STICKY,
+  update(value, tr) {
+    if (tr.docChanged) return tableEdgeArrived(tr.state);
+    if (tr.selection) return EMPTY_STICKY;
+    return value;
+  },
+});
+
+export const tableEdgeStickyField = tableEdgeSticky;
+
 function buildDecorations(view) {
   const { state } = view;
   const selHeads = state.selection.ranges.map((r) => r.head);
   const caretIn = (a, b) => selHeads.some((h) => h >= a && h <= b);
+  const tableSticky = state.field(tableEdgeSticky, false) || EMPTY_STICKY;
 
   const ranges = [];
+  // 着重号扫描要避开代码区：可见范围内顺手收集（仅实验开关打开时）
+  const codeRanges = [];
   // block widget 已接管的 Table range：其子节点的 replace/line 装饰必须避开，
   // 否则与整表 block replace（由 tableWidgets StateField 下发）重叠 → CM 抛异常白屏
   const widgetTables = [];
@@ -539,6 +612,8 @@ function buildDecorations(view) {
       to: v.to,
       enter(node) {
         const { from, to, name } = node;
+        if (lab.emphasisDot && (name === "FencedCode" || name === "InlineCode"))
+          codeRanges.push([from, to]);
 
         // 标题：整行套用字号；光标不在本标题内时隐藏 # 标记。
         // Setext 标题的下划线行（===/---）不套标题字号——否则该行被隐藏后
@@ -596,9 +671,19 @@ function buildDecorations(view) {
             }
             break;
           }
-          case "Link":
-            ranges.push(markLink.range(from, to));
+          case "Link": {
+            // Telari 0.5.0：文件链接虚线、网页链接实线
+            const lm = /\]\(([^)\s]+)/.exec(state.doc.sliceString(from, to));
+            ranges.push(
+              Decoration.mark({
+                class:
+                  lm && classifyLinkHref(lm[1]) === "file"
+                    ? "cm-link cm-link-file"
+                    : "cm-link",
+              }).range(from, to)
+            );
             break;
+          }
           case "LinkMark":
           case "URL": {
             // 链接/图片的括号与 URL：光标不在其内时折叠（Typora 只留链接文字）；
@@ -661,7 +746,10 @@ function buildDecorations(view) {
             // P2-1 方案 A：整表 block widget 由 tableWidgets StateField 提供
             // （CM 硬限制：block 装饰不允许经 ViewPlugin 下发）。这里只登记
             // 接管范围供子节点装饰避让；判定规则与 StateField 严格一致
-            if (!caretIn(from, to) && parseTable(state, node.node)) {
+            if (
+              !caretInTable(state, selHeads, from, to, tableSticky) &&
+              parseTable(state, node.node)
+            ) {
               const lineFrom = state.doc.lineAt(from).from;
               const lineTo = state.doc.lineAt(to).to;
               widgetTables.push({ from: lineFrom, to: lineTo });
@@ -675,7 +763,12 @@ function buildDecorations(view) {
             const raw = state.doc.sliceString(from, to);
             const p = node.node.parent;
             const wholeRow = !/[^|\s:-]/.test(raw);
-            if (wholeRow && p && p.name === "Table" && !caretIn(p.from, p.to)) {
+            if (
+              wholeRow &&
+              p &&
+              p.name === "Table" &&
+              !caretInTable(state, selHeads, p.from, p.to, tableSticky)
+            ) {
               ranges.push(Decoration.replace({}).range(from, to));
               break;
             }
@@ -733,6 +826,26 @@ function buildDecorations(view) {
     });
   }
 
+  // ---- ^^着重号^^（实验室开关，借鉴 Telari 0.3.5 CJK emphasis）----
+  // 语法树没有这种标记，逐可见行正则扫描；避开代码区/接管表格/光标所在段
+  if (lab.emphasisDot) {
+    for (const v of view.visibleRanges) {
+      for (let p = v.from; p <= v.to; ) {
+        const line = state.doc.lineAt(p);
+        for (const s of findEmphasisSpans(line.text)) {
+          const from = line.from + s.from;
+          const to = line.from + s.to;
+          if (caretIn(from, to) || inWidgetTable(from)) continue;
+          if (codeRanges.some(([a, b]) => from < b && to > a)) continue;
+          ranges.push(markEmDot.range(line.from + s.contentFrom, line.from + s.contentTo));
+          ranges.push(Decoration.replace({}).range(from, from + 2));
+          ranges.push(Decoration.replace({}).range(to - 2, to));
+        }
+        p = line.to + 1;
+      }
+    }
+  }
+
   // 统一生成行装饰：每行一个合并 class 的 Decoration.line
   for (const [lineFrom, classes] of lineClasses) {
     ranges.push(
@@ -749,7 +862,7 @@ function buildDecorations(view) {
 // 表格接管范围的全量真源在这里；liveMarkdown 插件里那份 widgetTables 只是为
 // 子节点装饰避让做的同规则镜像。拆成两个纯值字段：facet.from 只接受静态值，
 // 包装对象经 getter 下发会在部分版本踩动态判定的坑。
-function buildTableDecorations(state) {
+function buildTableDecorations(state, sticky) {
   const decorations = [];
   const atomicRanges = [];
   const text = state.doc.toString();
@@ -760,12 +873,11 @@ function buildTableDecorations(state) {
     };
   }
   const heads = state.selection.ranges.map((r) => r.head);
-  const caretIn = (a, b) => heads.some((h) => h >= a && h <= b);
   // syntaxTree（非 ensure）：深处的表格等解析器追上后再出 widget，不卡按键
   syntaxTree(state).iterate({
     enter(node) {
       if (node.name !== "Table") return;
-      if (caretIn(node.from, node.to)) return;
+      if (caretInTable(state, heads, node.from, node.to, sticky)) return;
       const parsed = parseTable(state, node.node);
       if (!parsed) return;
       const lineFrom = state.doc.lineAt(node.from).from;
@@ -793,7 +905,10 @@ let tableFieldTree = null;
 const tableDecoField = StateField.define({
   create: (state) => {
     tableFieldTree = syntaxTree(state);
-    return buildTableDecorations(state).decorations;
+    return buildTableDecorations(
+      state,
+      state.field(tableEdgeSticky, false) || EMPTY_STICKY
+    ).decorations;
   },
   update(value, tr) {
     // 必须追踪语法树身份：新载入的文档由 ParseWorker 后台渐进解析，其 dispatch
@@ -802,7 +917,11 @@ const tableDecoField = StateField.define({
     const tree = syntaxTree(tr.state);
     if (tr.docChanged || tr.selection || tree !== tableFieldTree) {
       tableFieldTree = tree;
-      return buildTableDecorations(tr.state).decorations;
+      // tableEdgeSticky 在 extensions 里先于本字段注册，这里读到的是本轮更新后的值
+      return buildTableDecorations(
+        tr.state,
+        tr.state.field(tableEdgeSticky, false) || EMPTY_STICKY
+      ).decorations;
     }
     return value;
   },
@@ -822,6 +941,7 @@ export const liveMarkdown = ViewPlugin.fromClass(
   class {
     constructor(view) {
       this.tree = syntaxTree(view.state);
+      this.labV = labVersion;
       this.decorations = buildDecorations(view);
     }
     update(u) {
@@ -835,9 +955,11 @@ export const liveMarkdown = ViewPlugin.fromClass(
         u.docChanged ||
         u.viewportChanged ||
         u.selectionSet ||
-        tree !== this.tree
+        tree !== this.tree ||
+        this.labV !== labVersion
       ) {
         this.tree = tree;
+        this.labV = labVersion;
         this.decorations = buildDecorations(u.view);
       }
     }
@@ -979,6 +1101,9 @@ export const baseTheme = EditorView.theme({
     paddingLeft: "12px",
   },
   ".cm-link": { color: "var(--md-link)", textDecoration: "underline" },
+  // 文件链接虚线（Telari 0.5.0）；着重号下加圆点（CSS text-emphasis，WebView 原生支持）
+  ".cm-link-file": { textDecoration: "underline dotted" },
+  ".cm-em-dot": { textEmphasis: "filled dot", textEmphasisPosition: "under" },
   ".cm-strike": { textDecoration: "line-through", color: "var(--md-muted)" },
   // 行样式只负责留白，横线本体由 .cm-hrline widget 画（光标进入时显示原文 `---`）
   ".cm-hr": { margin: "0.35em 0" },
