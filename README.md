@@ -1,4 +1,4 @@
-# Typora-Lite — 原生 Windows 轻量 Markdown 编辑器（v0.4.1）
+# Typora-Lite — 原生 Windows 轻量 Markdown 编辑器（v0.4.2）
 
 一个对标 Typora「所见即所得 / 打字即渲染」体验，但**安装包更小（~2.6 MB）、冷启动更快（无自带浏览器内核）、纯 Windows 原生**的 Markdown 编辑器。
 
@@ -7,7 +7,7 @@
 - **打字即渲染**：光标离开即隐藏 `#` / `**` / 反引号等标记——标题、粗斜体、行内代码、代码块、引用、链接、任务列表、分割线，全部原地渲染
 - **表格真渲染**：列对齐、斑马纹、宽表横向滚动；点击单元格直接进格编辑；单元格内行内代码与粗斜体
 - **代码块容器**：圆角容器 + 语言标签 + 一键复制，光标进块回到源码编辑
-- **大纲折叠树**：层级折叠、点击跳转、跟随光标高亮当前章节
+- **大纲折叠树**：层级折叠、点击跳转、随阅读滚动实时高亮当前章节（光标/点击仍优先）
 - **阅读位置记忆**：重开文档自动跳回上次阅读位置
 - **一键排版整理**（`Ctrl+Shift+T`）：中英文交界补空格、半角标点转全角，代码/链接/URL 自动豁免
 - **实验室**：`.txt` 纯文本即读、`^^着重号^^` 等实验开关，统一容器、选择持久化
@@ -20,8 +20,8 @@
 
 | 安装包 | 大小 | 下载 |
 |---|---|---|
-| **NSIS 安装器（推荐，中文向导）** | ~2.6 MB | [Typora-Lite_0.4.1_x64-setup.exe](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.1_x64-setup.exe) |
-| MSI 安装包（中文界面） | ~3.6 MB | [Typora-Lite_0.4.1_x64_zh-CN.msi](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.1_x64_zh-CN.msi) |
+| **NSIS 安装器（推荐，中文向导）** | ~2.6 MB | [Typora-Lite_0.4.2_x64-setup.exe](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.2_x64-setup.exe) |
+| MSI 安装包（中文界面） | ~3.6 MB | [Typora-Lite_0.4.2_x64_zh-CN.msi](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.2_x64_zh-CN.msi) |
 
 安装包集中放在 [`installer` 分支](https://github.com/shenxinduwang/typora-lite/tree/installer)（该分支只放二进制产物，源码在 `main` 分支），产物清单与 SHA-256 见该分支 README。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 

@@ -550,7 +550,8 @@ function setOutlineOpen(open) {
   document.getElementById("btn-outline").classList.toggle("active", open);
   if (open) {
     rebuildOutline();
-    updateOutlineActive();
+    // 打开时按"正在读的位置"高亮：光标可能早已滚出视口
+    updateOutlineActive(viewportTopDocPos());
   }
 }
 
@@ -586,21 +587,52 @@ function rebuildOutline() {
     renderOutlineNode(root, outlineList, visible);
   }
   outlineVisible = visible;
+  outlineActiveIdx = -1; // DOM 已换新，强制重刷 active class
   updateOutlineActive(); // 条目可能变化，重建后重算高亮
 }
 
-// 只找"光标之前最近的可见标题"，改 class 不重建 DOM，选区变化零开销
-function updateOutlineActive() {
+// 视口顶部对应的文档位置：滚动阅读时高亮"正在读的章节"，而不是光标所在章节。
+// 滚动不产生 selectionSet，只靠 updateListener 的高亮会永远停在光标处（本 bug 根因）。
+function viewportTopDocPos() {
+  const rect = view.scrollDOM.getBoundingClientRect();
+  // y 落在内容首行区域（.cm-content 顶部 padding 20px，取 24px 处）；
+  // 短文档/底部 60vh 留白返回 null 时退到文末，保证总有可高亮项
+  const pos = view.posAtCoords({ x: rect.left + 24, y: rect.top + 24 });
+  return pos == null ? view.state.doc.length : pos;
+}
+
+let outlineActiveIdx = -1;
+let lastCursorActiveAt = 0; // 最近一次光标驱动的高亮时刻
+
+// 只找"位置之前最近的可见标题"，改 class 不重建 DOM，滚动/选区变化零重建开销。
+// pos 缺省 = 光标（点击/打字）；滚动时传入视口顶部位置。
+function updateOutlineActive(pos = view.state.selection.main.head) {
   if (!outlineOpen) return;
-  const head = view.state.selection.main.head;
   let activeIdx = -1;
   for (let i = 0; i < outlineVisible.length; i++) {
-    if (outlineVisible[i].from <= head) activeIdx = i;
+    if (outlineVisible[i].from <= pos) activeIdx = i;
     else break;
   }
-  outlineVisible.forEach((v, i) => v.el.classList.toggle("active", i === activeIdx));
-  if (outlineVisible[activeIdx])
-    outlineVisible[activeIdx].el.scrollIntoView({ block: "nearest" });
+  // 滚动时每帧都会调用：条目没变就不碰 DOM，避免 class 反复抖动
+  if (activeIdx !== outlineActiveIdx) {
+    outlineActiveIdx = activeIdx;
+    outlineVisible.forEach((v, i) => v.el.classList.toggle("active", i === activeIdx));
+  }
+  const active = outlineVisible[activeIdx];
+  if (active) active.el.scrollIntoView({ block: "nearest" }); // 大纲自身跟随滚动
+}
+
+// 编辑器滚动：落盘阅读位置 + 按视口顶部同步大纲高亮（rAF 合帧，滚得再快也只算一次）
+let outlineScrollRaf = 0;
+function onEditorScroll() {
+  schedulePositionSave();
+  if (!outlineOpen || outlineScrollRaf) return;
+  outlineScrollRaf = requestAnimationFrame(() => {
+    outlineScrollRaf = 0;
+    // 光标刚动过（打字/点击）→ 以光标章节为准，不让随之而来的 CM 自动滚动抢走高亮
+    if (performance.now() - lastCursorActiveAt < 150) return;
+    updateOutlineActive(viewportTopDocPos());
+  });
 }
 
 // 打字防抖重建大纲；ensureSyntaxTree 全文解析在 500ms 空闲后做，不卡每键
@@ -813,6 +845,7 @@ function baseExtensionsCore(mdExt, plain) {
         schedulePositionSave();
       }
       if (u.selectionSet) {
+        lastCursorActiveAt = performance.now(); // 光标优先：短窗口内的自动滚动不抢高亮
         updateOutlineActive();
         schedulePositionSave();
       }
@@ -847,7 +880,8 @@ const view = new EditorView({
   }),
 });
 setEditorViewRef(view); // 表格 widget 点击时反查主视图
-view.scrollDOM.addEventListener("scroll", schedulePositionSave, { passive: true }); // 滚动即记阅读位置
+// 滚动：既记阅读位置，也按视口顶部同步大纲高亮（滚动不产生 selectionSet，必须显式接）
+view.scrollDOM.addEventListener("scroll", onEditorScroll, { passive: true });
 
 // 点击任务列表复选框（[ ] ↔ [x]）：从被点的 widget DOM 反查精确文档位置再切换源码。
 // 关键：replace 型 widget 无文本宽度，posAtCoords 会跨行错位；posAtDOM 才可靠。
