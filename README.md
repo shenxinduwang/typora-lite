@@ -1,4 +1,4 @@
-# Typora-Lite — 原生 Windows 轻量 Markdown 编辑器（v0.4.2）
+# Typora-Lite — 原生 Windows 轻量 Markdown 编辑器（v0.4.6）
 
 一个对标 Typora「所见即所得 / 打字即渲染」体验，但**安装包更小（~2.6 MB）、冷启动更快（无自带浏览器内核）、纯 Windows 原生**的 Markdown 编辑器。
 
@@ -20,8 +20,8 @@
 
 | 安装包 | 大小 | 下载 |
 |---|---|---|
-| **NSIS 安装器（推荐，中文向导）** | ~2.6 MB | [Typora-Lite_0.4.2_x64-setup.exe](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.2_x64-setup.exe) |
-| MSI 安装包（中文界面） | ~3.6 MB | [Typora-Lite_0.4.2_x64_zh-CN.msi](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.2_x64_zh-CN.msi) |
+| **NSIS 安装器（推荐，中文向导）** | ~2.8 MB | [Typora-Lite_0.4.6_x64-setup.exe](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.6_x64-setup.exe) |
+| MSI 安装包（中文界面） | ~3.9 MB | [Typora-Lite_0.4.6_x64_zh-CN.msi](https://github.com/shenxinduwang/typora-lite/raw/installer/Typora-Lite_0.4.6_x64_zh-CN.msi) |
 
 安装包集中放在 [`installer` 分支](https://github.com/shenxinduwang/typora-lite/tree/installer)（该分支只放二进制产物，源码在 `main` 分支），产物清单与 SHA-256 见该分支 README。版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 

@@ -1,5 +1,5 @@
 // main.js —— 组装编辑器 + 文件读写(编码/行尾记忆) + 快捷键 + 脏标记
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView, keymap, drawSelection } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
@@ -21,7 +21,7 @@ import {
 } from "./liveMarkdown.js";
 import { indentList, outdentList } from "./listEditing.js";
 import { collectOutline } from "./outline.js";
-import { tidyText } from "./tidy.js";
+import { tidyText, PROTECTED_NODE_NAMES } from "./tidy.js";
 import {
   loadSettings,
   saveSettings,
@@ -69,6 +69,7 @@ const a = 1;
 `;
 
 let currentPath = null; // 仅 Tauri 下有真实路径
+let docSession = 0; // 文档身份令牌：异步读盘返回时用于识别“期间已换文档”
 let currentBrowserName = null; // 浏览器模式记住打开的文件名，保存下载时沿用
 // 脏判定快照：CM 文档模型永远是 LF，所以把“上次保存内容”也归一成 LF 缓存住，
 // 每次按键只做一次字符串比较，不再对全文跑正则、不再重复物化第二份字符串。
@@ -101,21 +102,27 @@ function isPlainDoc(name) {
 // Ctrl+Z 能一路“撤销回上一个文件”，窗口路径与实际内容就错位了。
 // nameHint：浏览器模式没有路径，用 File.name 判断 .txt。
 function applyLoadedText(text, path, encoding, nameHint) {
+  docSession++;
   originalEncoding = encoding || "utf8";
   originalEolCRLF = text.includes("\r\n");
   currentPath = path;
   if (path) currentBrowserName = null;
+  // F1：换文档必须作废外部修改监听的基准（null = 未知，轮询首次采样先采纳）。
+  // 否则在新文件 mtime 异步刷新完成前的轮询窗口里，会拿上一篇文档的 mtime
+  // 判定新文档“已被外部修改”——干净则多余重载，已输入则误弹丢弃确认框
+  lastKnownMtime = null;
   lastSavedNorm = normEol(text);
   const plain = isPlainDoc(path ? path.split(/[\\/]/).pop() : nameHint);
   view.setState(
     EditorState.create({
       doc: text,
-      extensions: plain ? plainExtensions : baseExtensions,
+      extensions: makeExtensions(plain),
     })
   );
   docPlain = plain;
   clearDraft(); // 载入的内容即当前真相，旧草稿作废（恢复草稿的流程会重新写回）
   clearImageCache(); // 换文档：图片缓存按文档隔离，避免跨目录同名 rel 串图
+  clearOutlineCollapse(); // 折叠键不含文档身份，换文档必须清空防联动
   refreshLabel();
   // setState 不产生事务：ViewUpdate.docChanged = !changes.empty，而 changes 只由
   // transactions 合成，换文档时事务数组为空 → updateListener 的 docChanged 分支
@@ -275,11 +282,10 @@ function loadFile(path) {
 async function openFile() {
   try {
     if (IS_TAURI) {
-      const { open } = await import("@tauri-apps/plugin-dialog");
-      const path = await open({
-        multiple: false,
-        filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
-      });
+      // F-1：改走 Rust 侧原生对话框 command——路径先进入会话授权集再返回，
+      // 参数/返回与原 plugin-dialog open 完全同形（string | null）
+      const { invoke } = await import("@tauri-apps/api/core");
+      const path = await invoke("dialog_pick_file");
       if (!path) return;
       await loadFile(path); // 脏标记确认在 loadFile 内做
       return;
@@ -307,11 +313,9 @@ async function saveFile() {
       const { invoke } = await import("@tauri-apps/api/core");
       let path = currentPath;
       if (!path) {
-        const { save } = await import("@tauri-apps/plugin-dialog");
-        path = await save({
-          defaultPath: "未命名.md",
-          filters: [{ name: "Markdown", extensions: ["md", "markdown", "txt"] }],
-        });
+        // F-1：改走 Rust 侧原生另存为 command（授权后再返回路径），同形替换
+        const { invoke: inv } = await import("@tauri-apps/api/core");
+        path = await inv("dialog_save_file");
         if (!path) return;
       }
       // 写盘期间挡住 mtime 轮询，避免"自己写完 → mtime 已变但基准未更新"的
@@ -363,15 +367,17 @@ async function saveFile() {
 
 async function newFile() {
   if (!(await confirmDiscard())) return;
+  docSession++;
   currentPath = null;
   currentBrowserName = null;
   lastSavedNorm = "";
   originalEolCRLF = false;
   originalEncoding = "utf8";
-  view.setState(EditorState.create({ doc: "", extensions: baseExtensions }));
+  view.setState(EditorState.create({ doc: "", extensions: makeExtensions(false) }));
   docPlain = false;
   clearDraft();
   clearImageCache();
+  clearOutlineCollapse(); // 新建 = 换文档：折叠记忆同样清空
   refreshLabel();
   if (outlineOpen) rebuildOutline(); // 同 applyLoadedText：新建后也要主动刷新大纲
   view.focus();
@@ -488,11 +494,32 @@ const outlinePanel = document.getElementById("outline");
 const outlineList = document.getElementById("outline-list");
 let outlineOpen = false;
 let outlineEntries = [];
-let outlineVisible = []; // 当前可见条目 [{ from, el }]，文档顺序，供高亮定位
+let outlineVisible = []; // 当前可见条目 [{ node, el }]，文档顺序，供高亮定位
+// F2：条目位置锚——全部存活条目对象的引用。条目 from 是重建时的快照，500ms
+// 防抖窗口内上方内容增删会让快照漂移；点击跳转/高亮都在使用时刻读 node.from，
+// 这里在每个文档变更事务里同步 mapPos，窗口内点击也不会跳错位置。
+let outlineAnchors = [];
+function mapOutlinePositions(u) {
+  for (const n of outlineAnchors) n.from = u.changes.mapPos(n.from);
+}
 let outlineTimer = null;
-// 折叠状态按 level:text 记忆：rebuildOutline 全量重建 DOM 后仍能保持展开
-// （打字 500ms 防抖会触发重建，不记忆的话折叠会全弹开）
+let outlineLastTree = null; // 上次大纲见过的语法树身份（后台解析完成的 dispatch 兜底）
+// 折叠状态按 level:seq:text 记忆：rebuildOutline 全量重建 DOM 后仍能保持展开
+// （打字 500ms 防抖会触发重建，不记忆的话折叠会全弹开）。seq 是「同级同名
+// 标题的第几次出现」，避免两处 `## 备注` 折叠态联动；key 不含文档路径，
+// 换文档时在 applyLoadedText/newFile 里清空，防止跨文档互相影响。
 const outlineCollapsed = new Set();
+const outlineSeqCounts = new Map(); // "level:text" -> 已出现次数（本次 rebuild 内）
+function outlineKeyOf(node) {
+  const base = `${node.level}:${node.text}`;
+  const seq = (outlineSeqCounts.get(base) || 0) + 1;
+  outlineSeqCounts.set(base, seq);
+  return `${base}:${seq}`;
+}
+function clearOutlineCollapse() {
+  outlineCollapsed.clear();
+  outlineSeqCounts.clear();
+}
 
 // 扁平 entries → 树：按 level 降序压栈，栈顶即当前节点的父
 function buildOutlineTree(entries) {
@@ -508,7 +535,7 @@ function buildOutlineTree(entries) {
 }
 
 function renderOutlineNode(node, container, visible) {
-  const key = `${node.level}:${node.text}`;
+  const key = outlineKeyOf(node);
   const hasKids = node.children.length > 0;
   const collapsed = outlineCollapsed.has(key);
   const row = document.createElement("div");
@@ -538,7 +565,8 @@ function renderOutlineNode(node, container, visible) {
     view.focus();
   });
   container.appendChild(row);
-  visible.push({ from: node.from, el: row });
+  visible.push({ node, el: row });
+  outlineAnchors.push(node); // F2：登记锚，编辑事务里同步平移 from
   if (hasKids && !collapsed) {
     for (const c of node.children) renderOutlineNode(c, container, visible);
   }
@@ -558,6 +586,8 @@ function setOutlineOpen(open) {
 function rebuildOutline() {
   if (!outlineOpen) return;
   outlineEntries = collectOutline(view.state);
+  outlineAnchors = []; // F2：锚随重建重置（新条目对象由 renderOutlineNode 重新登记）
+  outlineSeqCounts.clear(); // 同名序号每次重建从头计
   outlineList.textContent = "";
   if (!outlineEntries.length) {
     const empty = document.createElement("div");
@@ -588,17 +618,29 @@ function rebuildOutline() {
   }
   outlineVisible = visible;
   outlineActiveIdx = -1; // DOM 已换新，强制重刷 active class
-  updateOutlineActive(); // 条目可能变化，重建后重算高亮
+  // 条目可能变化，重建后重算高亮。取视口顶部位置（与 setOutlineOpen 的打开
+  // 路径一致）：默认取光标会在「打字后立即滚动阅读」场景把高亮弹回光标章节
+  updateOutlineActive(viewportTopDocPos());
 }
 
 // 视口顶部对应的文档位置：滚动阅读时高亮"正在读的章节"，而不是光标所在章节。
 // 滚动不产生 selectionSet，只靠 updateListener 的高亮会永远停在光标处（本 bug 根因）。
 function viewportTopDocPos() {
   const rect = view.scrollDOM.getBoundingClientRect();
-  // y 落在内容首行区域（.cm-content 顶部 padding 20px，取 24px 处）；
-  // 短文档/底部 60vh 留白返回 null 时退到文末，保证总有可高亮项
-  const pos = view.posAtCoords({ x: rect.left + 24, y: rect.top + 24 });
-  return pos == null ? view.state.doc.length : pos;
+  // y 取 rect.top + 34：略过点击跳转的 yMargin=32，长文档布局延迟/惯性滚动
+  // 导致 scroll 事件在 150ms 光标优先窗口外晚到时，探针落点不会比目标标题行
+  // 顶高出 8px 而把高亮落到上一节。内容首行区域（.cm-content 顶部 padding
+  // 28px，见 liveMarkdown.js 主题），短文档/底部 60vh 留白返回 null 时退到文末。
+  const pos = view.posAtCoords({ x: rect.left + 24, y: rect.top + 34 });
+  if (pos != null) return pos;
+  // 顶部 padding / 短文档可能探不到坐标：再试内容区内一点。仍为空时按滚动
+  // 位置区分——真正停在顶部归首章，滚到底部留白才归末章。
+  const fallback = view.posAtCoords({
+    x: rect.left + 24,
+    y: rect.top + Math.min(80, rect.height / 2),
+  });
+  if (fallback != null) return fallback;
+  return view.scrollDOM.scrollTop > 0 ? view.state.doc.length : 0;
 }
 
 let outlineActiveIdx = -1;
@@ -610,16 +652,17 @@ function updateOutlineActive(pos = view.state.selection.main.head) {
   if (!outlineOpen) return;
   let activeIdx = -1;
   for (let i = 0; i < outlineVisible.length; i++) {
-    if (outlineVisible[i].from <= pos) activeIdx = i;
+    if (outlineVisible[i].node.from <= pos) activeIdx = i;
     else break;
   }
   // 滚动时每帧都会调用：条目没变就不碰 DOM，避免 class 反复抖动
   if (activeIdx !== outlineActiveIdx) {
     outlineActiveIdx = activeIdx;
     outlineVisible.forEach((v, i) => v.el.classList.toggle("active", i === activeIdx));
+    // 只在条目真的变化时滚动大纲；滚动正文每帧调用 scrollIntoView 会白做布局读取
+    const active = outlineVisible[activeIdx];
+    if (active) active.el.scrollIntoView({ block: "nearest" });
   }
-  const active = outlineVisible[activeIdx];
-  if (active) active.el.scrollIntoView({ block: "nearest" }); // 大纲自身跟随滚动
 }
 
 // 编辑器滚动：落盘阅读位置 + 按视口顶部同步大纲高亮（rAF 合帧，滚得再快也只算一次）
@@ -669,7 +712,7 @@ themeMedia.addEventListener("change", () => {
 
 // ---- 实验室（lab）标志：liveMarkdown 装饰层与 main 文档模式各持一半，启动时注入 ----
 // 默认值兜一层浅拷贝：旧版持久化设置没有 lab 字段，Object.assign 进模块默认值也成立
-setLabFlags({ txtPlain: true, emphasisDot: false, ...(settings.lab || {}) });
+setLabFlags({ txtPlain: true, emphasisDot: false, netImages: false, ...(settings.lab || {}) });
 
 // ---- 一键中英文排版整理（T-4，借鉴 Telari 0.5.4 排版）----
 // 保护区=整棵子树不外溢：代码/链接/图片/HTML/自动链接内部的文本既不插空格
@@ -681,18 +724,10 @@ function protectedRangesForTidy(state) {
   const ranges = [];
   tree.iterate({
     enter(n) {
-      switch (n.name) {
-        case "FencedCode":
-        case "CodeBlock":
-        case "InlineCode":
-        case "Link":
-        case "Image":
-        case "AutoLink":
-        case "URL":
-        case "HTML":
-        case "HTMLBlock":
-          ranges.push([n.from, n.to]);
-          return false;
+      // 节点名单与 tidy.js 导出的 PROTECTED_NODE_NAMES 保持同源（测试锚定）
+      if (PROTECTED_NODE_NAMES.has(n.name)) {
+        ranges.push([n.from, n.to]);
+        return false;
       }
     },
   });
@@ -725,15 +760,12 @@ function currentDocName() {
 function reapplyDocMode() {
   const plain = isPlainDoc(currentDocName());
   if (plain === docPlain) return;
-  const top = view.scrollDOM.scrollTop;
-  view.setState(
-    EditorState.create({
-      doc: docText(),
-      extensions: plain ? plainExtensions : baseExtensions,
-    })
-  );
+  // F6：同文档内切换模式走 Compartment.reconfigure，撤销历史/光标/滚动全保留。
+  // （旧实现 EditorState.create + setState 整体重建：Ctrl+Z 清零、光标跳回文首）
+  view.dispatch({
+    effects: modeCompartment.reconfigure(plain ? [] : liveExts),
+  });
   docPlain = plain;
-  view.scrollDOM.scrollTop = top;
   showToast(plain ? "纯文本模式：不渲染 Markdown" : "已恢复 Markdown 渲染");
 }
 
@@ -782,6 +814,13 @@ function renderRecentMenu() {
   clear.addEventListener("click", () => {
     recentFiles = [];
     saveRecent(recentFiles);
+    // 清掉积累的授权，只保留当前打开文档——否则正在编辑的文档会立刻无法保存。
+    // 非阻塞：失败只影响下次冷启动恢复旧授权。
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) =>
+        invoke("clear_authorized_paths", { keepPath: currentPath })
+      )
+      .catch(() => {});
     toggleRecentMenu(false);
   });
   menu.appendChild(clear);
@@ -808,20 +847,35 @@ function saveDraftNow() {
   saveDraft({
     text,
     path: currentPath,
+    // F5：浏览器模式没有路径，文件名随草稿走——恢复后标题与保存下载不再
+    // 回落「未命名.md」（Tauri 模式此字段为 null，不影响原逻辑）
+    name: currentBrowserName,
     encoding: originalEncoding,
     eolCRLF: originalEolCRLF,
     savedAt: Date.now(),
   });
 }
 
-// 编辑器扩展集提出来共用：载入/新建文件时要整体重建 EditorState（见 applyLoadedText）
+// 编辑器扩展集：模式差异部分挂 Compartment。载入/新建文件时仍整体重建
+// EditorState（见 applyLoadedText）；同一文档内切换 .txt 纯文本模式改为
+// compartment.reconfigure——不再 setState 重建，撤销历史与光标原样保留（F6：
+// 旧实现切实验室开关会清空 Ctrl+Z 历史并把光标重置到文首）。
 const markdownExt = markdown({ extensions: GFM, codeLanguages: languages });
-// .txt 纯文本即读（实验室开关，借鉴 Telari 0.5.4）：去掉 markdown 解析与
-// 全部原地渲染扩展，只剩编辑/查找/主题——几十 MB 小说打开即读也顺便受益
-const plainExtensions = baseExtensionsCore(markdownExt, true);
-const baseExtensions = baseExtensionsCore(markdownExt, false);
-function baseExtensionsCore(mdExt, plain) {
-  const full = [
+const modeCompartment = new Compartment();
+// .txt 纯文本即读（实验室开关，借鉴 Telari 0.5.4）时这组整体摘除，只剩
+// 编辑/查找/主题——几十 MB 小说打开即读也顺便受益。
+// 顺序约定与旧实现一致：syntaxHighlighting 在 liveMarkdown 之前；
+// tableEdgeStickyField 必须先于 tableWidgets 注册，使 tableWidgets.update
+// 能读到本轮事务更新后的值（数组内顺序即注册顺序）。
+const liveExts = [
+  markdownExt,
+  syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+  liveMarkdown,
+  tableEdgeStickyField,
+  tableWidgets, // 表格 block widget（StateField，block 装饰必须走状态层）
+];
+function makeExtensions(plain) {
+  return [
     drawSelection(),
     history(),
     closeBrackets(),
@@ -829,13 +883,7 @@ function baseExtensionsCore(mdExt, plain) {
     search({ top: true }),
     highlightSelectionMatches(),
     EditorView.lineWrapping,
-    mdExt,
-    syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-    liveMarkdown,
-    // 表格下方紧邻空行的 Enter 补行豁免名单——必须先于 tableWidgets 注册，
-    // 使 tableWidgets.update 能读到本轮事务更新后的值
-    tableEdgeStickyField,
-    tableWidgets, // 表格 block widget（StateField，block 装饰必须走状态层）
+    modeCompartment.of(plain ? [] : liveExts),
     baseTheme,
     EditorView.domEventHandlers({ mousedown: handleMouseDown, paste: handlePaste }),
     EditorView.updateListener.of((u) => {
@@ -843,6 +891,15 @@ function baseExtensionsCore(mdExt, plain) {
         queueLabel();
         scheduleOutlineRebuild();
         schedulePositionSave();
+        mapOutlinePositions(u); // F2：大纲条目位置锚随事务平移，防抖窗口内点击不漂移
+      }
+      // 语法树身份兜底：ParseWorker 后台渐进解析完成的事务不带 docChanged，
+      // 首次打开长文档时大纲可能拿的是部分树——树更新后（如 tableFieldTree
+      // 同款身份比较）再排一次重建，尾部标题不再长期缺失
+      const tree = syntaxTree(u.view.state);
+      if (tree !== outlineLastTree) {
+        outlineLastTree = tree;
+        if (!u.docChanged) scheduleOutlineRebuild();
       }
       if (u.selectionSet) {
         lastCursorActiveAt = performance.now(); // 光标优先：短窗口内的自动滚动不抢高亮
@@ -862,21 +919,13 @@ function baseExtensionsCore(mdExt, plain) {
     ]),
     startKeymap,
   ];
-  if (!plain) return full;
-  return full.filter(
-    (e) =>
-      e !== mdExt &&
-      e !== liveMarkdown &&
-      e !== tableEdgeStickyField &&
-      e !== tableWidgets
-  );
 }
 
 const view = new EditorView({
   parent: document.getElementById("editor"),
   state: EditorState.create({
     doc: DOC,
-    extensions: baseExtensions,
+    extensions: makeExtensions(false),
   }),
 });
 setEditorViewRef(view); // 表格 widget 点击时反查主视图
@@ -914,26 +963,78 @@ function handleTaskClick(event, v) {
   return true;
 }
 
-// Ctrl/Cmd+点击链接：用系统默认程序打开（URL 白名单在 Rust 端校验）
+// 单击 / Ctrl+Cmd+点击链接：用系统默认浏览器打开（URL 白名单在 Rust 端二次校验）。
+// - 单击（无修饰键、左键）：仅在「阅读态」生效——光标不在这条链接里且落点在
+//   可见的链接文字/URL 上。打开后 preventDefault（不再移动光标），与 Obsidian
+//   阅读视图一致的「点击即打开」心智；要编辑链接：点链接旁的正文再用方向键进。
+//   光标已在链接内（源码态）时单击仍是移动光标；Shift/Alt+单击（扩选）不拦截。
+// - Ctrl/Cmd+点击：任何时候（含源码态）直接打开，与旧行为一致。
 function handleLinkClick(event, v) {
-  if (!(event.ctrlKey || event.metaKey)) return false;
+  const withCtrl = !!(event.ctrlKey || event.metaKey);
+  if (!withCtrl && (event.button !== 0 || event.shiftKey || event.altKey)) return false;
   const pos = v.posAtCoords({ x: event.clientX, y: event.clientY });
   if (pos == null) return false;
   let url = null;
+  let isImage = false; // 图片的 URL 不算「链接」，单击不打开（Ctrl+点保持旧行为）
+  let linkFrom = -1;
+  let linkTo = -1;
+  let visFrom = -1; // 可见范围（链接文字 / 裸 URL 本体）；隐藏的 ](url) 折叠成
+  let visTo = -1; // 零宽，posAtCoords 可能落进折叠区——落点不在可见区不算点到
   syntaxTree(v.state).iterate({
     from: Math.max(0, pos - 1),
     to: Math.min(v.state.doc.length, pos + 1),
     enter(n) {
       if (pos < n.from || pos > n.to) return;
       if (n.name === "Link") {
-        const m = /\]\(([^)\s]+)/.exec(v.state.sliceDoc(n.from, n.to));
-        if (m) url = m[1];
+        linkFrom = n.from;
+        linkTo = n.to;
+        // 优先取语法树里的 URL 子节点：`]\(([^)\s]+)` 正则会把含 `)` 的 URL
+        // （维基 Foo_(bar) 等）在首个 `)` 处截断
+        let urlNode = null;
+        const marks = [];
+        for (let c = n.node.firstChild; c; c = c.nextSibling) {
+          if (c.name === "URL" && !urlNode) urlNode = c;
+          if (c.name === "LinkMark") marks.push(c);
+        }
+        if (urlNode) {
+          url = v.state.sliceDoc(urlNode.from, urlNode.to);
+        } else {
+          const m = /\]\(([^)\s]+)/.exec(v.state.sliceDoc(n.from, n.to));
+          if (m) url = m[1];
+        }
+        // 可见部分 = 首两个 LinkMark 之间的链接文字（`[文字](url)`）；
+        // 无标记的畸形链接退化为整段
+        if (marks.length >= 2) {
+          visFrom = marks[0].to;
+          visTo = marks[1].from;
+        } else {
+          visFrom = n.from;
+          visTo = n.to;
+        }
       } else if (n.name === "URL" && !url) {
+        // 裸 URL（GFM 自动链接）与 <url> 自动链接的 URL 子节点
+        const p = n.node.parent;
         url = v.state.sliceDoc(n.from, n.to);
+        isImage = !!p && p.name === "Image";
+        // 光标「在链接里」按 URL 本体判定（裸 URL 的整段 Paragraph 不算，
+        // 否则同段落里点别的文字也会被当成编辑态）
+        linkFrom = n.from;
+        linkTo = n.to;
+        visFrom = n.from;
+        visTo = n.to;
       }
     },
   });
   if (!url || !/^(https?:\/\/|mailto:)/i.test(url)) return false;
+  if (!withCtrl) {
+    // 编辑态：光标就在这条链接/URL 里，单击保持原生行为（移动光标）
+    if (linkFrom >= 0) {
+      const heads = v.state.selection.ranges.map((r) => r.head);
+      if (heads.some((h) => h >= linkFrom && h <= linkTo)) return false;
+    }
+    // 落点在折叠隐藏区（零宽的 ](url) 折叠处）或图片 URL：不算点到链接
+    if (isImage || (visFrom >= 0 && !(pos >= visFrom && pos <= visTo))) return false;
+  }
   event.preventDefault();
   if (!IS_TAURI) {
     // 浏览器兜底：没有 Rust open_external，直接开新标签（noopener 防 opener 攻击）
@@ -946,9 +1047,9 @@ function handleLinkClick(event, v) {
   return true;
 }
 
-// mousedown 总入口：Ctrl/Cmd+点链接优先，其次任务复选框
+// mousedown 总入口：单击/Ctrl+Cmd 点链接优先，其次任务复选框
 function handleMouseDown(event, v) {
-  if ((event.ctrlKey || event.metaKey) && handleLinkClick(event, v)) return true;
+  if (handleLinkClick(event, v)) return true;
   return handleTaskClick(event, v);
 }
 
@@ -1004,6 +1105,8 @@ function applyLabMenu() {
     (settings.lab.txtPlain ? "✓ " : "") + ".txt 纯文本阅读";
   document.getElementById("lab-emdot").textContent =
     (settings.lab.emphasisDot ? "✓ " : "") + "着重号（^^text^^）";
+  document.getElementById("lab-netimg").textContent =
+    (settings.lab.netImages ? "✓ " : "") + "远程图片加载";
 }
 function toggleLabFlag(key) {
   settings.lab[key] = !settings.lab[key];
@@ -1016,6 +1119,7 @@ function toggleLabFlag(key) {
 }
 document.getElementById("lab-txt").addEventListener("click", () => toggleLabFlag("txtPlain"));
 document.getElementById("lab-emdot").addEventListener("click", () => toggleLabFlag("emphasisDot"));
+document.getElementById("lab-netimg").addEventListener("click", () => toggleLabFlag("netImages"));
 applyLabMenu();
 
 setImagePathResolver(() => currentPath); // 图片预览解析相对 assets 路径用
@@ -1118,7 +1222,9 @@ if (IS_TAURI) {
   const draft = loadDraft();
   if (draft && draft.text) {
     if (window.confirm("检测到未保存的草稿，是否恢复？")) {
-      applyLoadedText(draft.text, null, draft.encoding || "utf8");
+      // F5：先回填文件名再载入（applyLoadedText 的 nameHint/标签都依赖它）
+      currentBrowserName = draft.name || null;
+      applyLoadedText(draft.text, null, draft.encoding || "utf8", draft.name || undefined);
       originalEolCRLF = !!draft.eolCRLF;
       // 与 Tauri 分支的 P0-1 修复同理：applyLoadedText 把草稿文本当成了"已保存
       // 基准"并清了草稿，不重设基准的话恢复出的内容会被判"干净"——关页不拦、
@@ -1150,41 +1256,60 @@ setInterval(async () => {
 // 只会让下一轮重新采纳基准，不会永久关掉监听
 setInterval(async () => {
   if (!IS_TAURI || !currentPath || selfWriting || document.hidden) return;
+  const path = currentPath;
+  const session = docSession;
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    const m = await invoke("file_mtime_ms", { path: currentPath });
+    const m = await invoke("file_mtime_ms", { path });
+    // IPC 往返期间可能已换文档（A→B，甚至 B→A）；旧路径的 mtime 不得
+    // 写进新文档的基准，否则会误判外部修改或漏掉真实变更。
+    if (path !== currentPath || session !== docSession) return;
     if (m == null) return;
     if (lastKnownMtime == null) {
       lastKnownMtime = m;
       return;
     }
     if (m === lastKnownMtime) return;
-    lastKnownMtime = m;
     if (!isDirty()) {
-      await reloadExternalPreservingView();
+      await reloadExternalPreservingView(path, session, m);
       return;
     }
     const { confirm } = await import("@tauri-apps/plugin-dialog");
-    if (
-      await confirm("文件已被外部程序修改，丢弃本地修改并加载新内容？", {
-        title: "外部修改",
-        kind: "warning",
-      })
-    ) {
-      await reloadExternalPreservingView();
+    const discard = await confirm("文件已被外部程序修改，丢弃本地修改并加载新内容？", {
+      title: "外部修改",
+      kind: "warning",
+    });
+    if (path !== currentPath || session !== docSession) return;
+    if (discard) {
+      await reloadExternalPreservingView(path, session, m);
+    } else {
+      // 用户明确保留本地版本：采纳本次 mtime，避免每 3 秒重复弹窗
+      lastKnownMtime = m;
     }
   } catch {
-    /* 文件可能被删除/占用，忽略本次 */
+    /* 文件可能被删除/占用：不更新基准，下一轮重试 */
   }
 }, 3000);
 
 // 同文件的外部改动重载：整体 setState 会把光标/滚动/撤销历史全部清零——
 // 用户正读着文件被 git/同步盘一改就跳回顶部，很跳戏。这里换成普通 dispatch
 // （撤销栈里多一条"外部重载"记录是合理语义），并尽量还原光标与滚动位置。
-async function reloadExternalPreservingView() {
+// 返回 true 才表示已成功应用到当前文档；调用方据此决定是否更新 mtime 基准。
+async function reloadExternalPreservingView(path, session, mtime) {
+  if (!path || path !== currentPath || session !== docSession) return false;
+  const docBefore = view.state.doc;
   const { invoke } = await import("@tauri-apps/api/core");
-  const res = await invoke("read_text_file", { path: currentPath });
+  const res = await invoke("read_text_file", { path });
+  // 读取期间用户可能切文档、或在新文档/本文件里继续输入。两条都要挡：
+  // 旧内容一旦 dispatch 进来，会把用户刚敲的字覆盖掉。
+  if (path !== currentPath || session !== docSession || view.state.doc !== docBefore) {
+    return false;
+  }
   const text = normEol(res.text);
+  // 外部改动可能顺带改了编码/行尾（同事转存 UTF-8、git 翻转 CRLF 等）：
+  // 重载后必须同步记忆，否则再保存会按旧编码/旧行尾静默改写文件字节
+  originalEncoding = res.encoding || "utf8";
+  originalEolCRLF = res.text.includes("\r\n");
   const sel = view.state.selection.main;
   const scroll = view.scrollDOM.scrollTop;
   if (text !== view.state.doc.toString()) {
@@ -1197,7 +1322,9 @@ async function reloadExternalPreservingView() {
   clearDraft();
   clearImageCache(); // 外部改动可能替换了图片文件：下次渲染重新解析，不再用旧缓存
   view.scrollDOM.scrollTop = Math.min(scroll, view.scrollDOM.scrollHeight);
+  lastKnownMtime = mtime; // 只在内容成功应用后推进基准，失败下轮重试
   refreshLabel();
+  return true;
 }
 
 // ---- 图片粘贴 / 拖入：存到文档同目录 assets/（无路径时退 data URL）----
@@ -1261,6 +1388,15 @@ async function copyExternalImage(path) {
       insertAtCursor(`![](${ref})`);
     } else {
       const b64 = await invoke("read_file_base64", { path });
+      // 与 insertImageBytes 的浏览器分支同款 2MB 守卫：无路径时 data URL 会随
+      // 正文进草稿 localStorage，几十 MB 的 base64 会写爆配额（崩溃保护失效）
+      if (b64.length > 2_000_000) {
+        await showErr(
+          "图片较大",
+          "该图片转存后超过 2MB。请先把文档保存到本地，再插入图片（会存到文档同目录的 assets/）。"
+        );
+        return;
+      }
       insertAtCursor(`![](data:image/${imageExt(name)};base64,${b64})`);
     }
   } catch (e) {

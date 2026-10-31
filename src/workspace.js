@@ -7,13 +7,21 @@ const DRAFT_KEY = "tl-draft";
 const DEFAULT_SETTINGS = {
   theme: "auto",
   autosave: false,
-  // 实验室开关（借鉴 Telari 0.5.4）：txtPlain=.txt 打开即纯文本读，emphasisDot=^^着重号^^
-  lab: { txtPlain: true, emphasisDot: false },
+  // 实验室开关（借鉴 Telari 0.5.4）：txtPlain=.txt 打开即纯文本读，emphasisDot=^^着重号^^，
+  // netImages=远程 http(s) 图片加载（默认关：离线编辑器打开文档零外联，security F-2）
+  lab: { txtPlain: true, emphasisDot: false, netImages: false },
 };
 
 export function loadSettings() {
   try {
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") };
+    const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+    // lab 单独兜底：持久化 JSON 里 lab 为 null/缺键时，浅合并会把整个默认
+    // lab 对象顶掉，读 settings.lab.txtPlain 即 TypeError（模块初始化中断白屏）
+    return {
+      ...DEFAULT_SETTINGS,
+      ...stored,
+      lab: { ...DEFAULT_SETTINGS.lab, ...(stored.lab || {}) },
+    };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -24,7 +32,9 @@ export function saveSettings(settings) {
 
 export function loadRecent() {
   try {
-    return JSON.parse(localStorage.getItem(RECENT_KEY)) || [];
+    const v = JSON.parse(localStorage.getItem(RECENT_KEY));
+    if (!Array.isArray(v)) return [];
+    return v.filter((x) => x && typeof x.path === "string");
   } catch {
     return [];
   }

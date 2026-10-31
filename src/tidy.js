@@ -3,6 +3,25 @@
 // 「保护区间」约定为半开 [from, to)：代码块、行内代码、链接、图片等区间内
 // 的文本一律不参与整理——调用方（main.js）从语法树收集，这里只做掩码。
 
+// 排版整理的保护区语法节点名单（lezer-markdown GFM 实测节点名）：
+// 块级代码/行内代码/链接/图片/自动链接/URL，以及行内 HTML——注意行内 HTML
+// 的节点名是 HTMLTag、HTML 注释是 Comment、处理指令是 ProcessingInstruction
+// （HTMLBlock 才是块级），漏掉会导致整理改写 HTML 属性值与注释内容。
+export const PROTECTED_NODE_NAMES = new Set([
+  "FencedCode",
+  "CodeBlock",
+  "InlineCode",
+  "Link",
+  "Image",
+  "AutoLink",
+  "URL",
+  "HTML",
+  "HTMLBlock",
+  "HTMLTag",
+  "Comment",
+  "ProcessingInstruction",
+]);
+
 // CJK 汉字 + 假名（日韩一并受益，与 Telari 0.2.0 的 CJK 支持范围对齐）
 const HAN = "\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u30ff";
 const HAN_RE = new RegExp(`[${HAN}]`);
@@ -106,6 +125,16 @@ export function tidyText(text, protectedRanges, stats) {
     protectedRanges,
     stats
   );
+}
+
+/** 文档是否含 `|`（表格渲染前的廉价短路）：逐行找首个含 | 的行即返回，
+ *  不把整个 CM Text 树物化成 JS 字符串（MB 级文档每键两次 O(n) 分配的来源）。
+ *  doc 只需支持 lineAt（CM EditorState.doc / Text 均满足）。 */
+export function docHasPipe(doc) {
+  for (let n = 1; n <= doc.lines; n++) {
+    if (doc.line(n).text.includes("|")) return true;
+  }
+  return false;
 }
 
 /** ^^着重号^^ 扫描（单行文本，相对偏移）：跨行、空内容、`^^^` 连排均不匹配 */

@@ -7,12 +7,12 @@
 import { Decoration, EditorView, ViewPlugin, WidgetType } from "@codemirror/view";
 import { RangeSet, StateField } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
-import { findEmphasisSpans, classifyLinkHref } from "./tidy.js";
+import { findEmphasisSpans, classifyLinkHref, docHasPipe } from "./tidy.js";
 
 // ---- 实验室开关（借鉴 Telari 0.5.4「实验室」页）----
 // main.js 启动时 setLabFlags(settings.lab) 注入；改动会 bump 版本号，
 // ViewPlugin 在下次 update 时对比版本重建装饰（不依赖 transaction 标志）。
-const lab = { txtPlain: true, emphasisDot: false };
+const lab = { txtPlain: true, emphasisDot: false, netImages: false };
 let labVersion = 0;
 export function setLabFlags(flags) {
   Object.assign(lab, flags);
@@ -23,7 +23,6 @@ export function setLabFlags(flags) {
 const markStrong = Decoration.mark({ class: "cm-strong" });
 const markEm = Decoration.mark({ class: "cm-em" });
 const markCode = Decoration.mark({ class: "cm-inline-code" });
-const markLink = Decoration.mark({ class: "cm-link" });
 const markStrike = Decoration.mark({ class: "cm-strike" });
 const markList = Decoration.mark({ class: "cm-listmark" });
 const markTdMark = Decoration.mark({ class: "cm-td-mark" });
@@ -155,7 +154,9 @@ function parseTable(state, tableNode) {
   let header = null;
   const rows = [];
   const mkCell = (cellNode) => ({
-    text: state.doc.sliceString(cellNode.from, cellNode.to).trim(), // eq 比较 + 点击兜底
+    // eq 比较必须用未 trim 的原文：只改首尾空白时 trim 后文本不变，
+    // widget 会被 eq 判等复用旧 DOM，显示旧空白（stale 渲染）
+    text: state.doc.sliceString(cellNode.from, cellNode.to),
     segs: inlineSegments(state, cellNode), // 行内渲染段（code/em/strong/del/text）
     from: cellNode.from,
     to: cellNode.to,
@@ -325,10 +326,12 @@ async function copyText(text) {
     ta.style.position = "fixed";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    ta.remove();
-    return ok;
+    try {
+      ta.select();
+      return document.execCommand("copy");
+    } finally {
+      ta.remove(); // execCommand 抛错（罕见上下文）也不能把透明 textarea 留在 body 里持有焦点
+    }
   } catch {
     return false;
   }
@@ -398,7 +401,24 @@ function codeTextOf(state, from, to) {
 }
 
 // 图片预览：<img> 的 src 解析结果缓存（key -> dataURL 或 null=失败）
+// 简单 LRU：命中续期 + 上限 30 条（每条是完整 data URL，单文档引用大量
+// 本地大图时会话内否则会堆积数十/上百 MB 字符串；Map 迭代序即插入序）
 const imageSrcCache = new Map();
+const IMAGE_CACHE_LIMIT = 30;
+function imageCacheGet(key) {
+  if (!imageSrcCache.has(key)) return undefined;
+  const v = imageSrcCache.get(key);
+  imageSrcCache.delete(key);
+  imageSrcCache.set(key, v); // 重新插入 = LRU 续期
+  return v;
+}
+function imageCacheSet(key, v) {
+  if (imageSrcCache.has(key)) imageSrcCache.delete(key);
+  imageSrcCache.set(key, v);
+  while (imageSrcCache.size > IMAGE_CACHE_LIMIT) {
+    imageSrcCache.delete(imageSrcCache.keys().next().value); // 淘汰最久未用
+  }
+}
 // 由 main.js 注入：rel 引用 -> 当前文档路径（用于 Rust 端解析相对 assets 路径）
 let imagePathResolver = null;
 export function setImagePathResolver(fn) {
@@ -435,27 +455,31 @@ async function resolveImageSrc(src, key, el) {
     const { invoke } = await import("@tauri-apps/api/core");
     const b64 = await invoke("read_asset_base64", { docPath, rel: src });
     const url = `data:${imageMime(src)};base64,${b64}`;
-    imageSrcCache.set(key, url);
+    imageCacheSet(key, url);
     el.src = url;
     delete el.dataset.loading;
   } catch {
-    imageSrcCache.set(key, null); // 失败不再重试，显示 alt 文本
+    imageCacheSet(key, null); // 失败不再重试，显示 alt 文本
     el.dataset.broken = "1";
   }
 }
 
 // 光标不在 Image 节点内时，整段 ![alt](src) 渲染成 <img> 预览
 class ImageWidget extends WidgetType {
-  constructor(src, title) {
+  constructor(src, title, allowRemote) {
     super();
     this.src = src;
     this.title = title || "";
+    // 构建期快照远程图开关并参与 eq：开关翻转后新旧 widget 判不等，
+    // CM 才会丢弃旧 DOM 重画（否则 toDOM 不再执行，门控不生效）
+    this.allowRemote = !!allowRemote;
   }
   eq(other) {
     return (
       other instanceof ImageWidget &&
       other.src === this.src &&
-      other.title === this.title
+      other.title === this.title &&
+      other.allowRemote === this.allowRemote
     );
   }
   toDOM() {
@@ -466,10 +490,12 @@ class ImageWidget extends WidgetType {
     if (this.src.startsWith("data:")) {
       el.src = this.src;
     } else if (/^https?:\/\//i.test(this.src)) {
-      // 远程图片：带协议的 URL 不是本地路径，丢给 read_asset_base64 做路径
-      // 解析必失败 → broken 虚线框。直接交给 WebView 加载（CSP img-src 已
-      // 放行 http:/https:），重复渲染由浏览器 HTTP 缓存兜住，不进本地缓存
-      el.src = this.src;
+      // 远程图片走实验室开关（默认关）：带协议的 URL 不是本地路径，关着时
+      // 不加载、以 broken 虚线框占位显示 alt——打开文档零外联，杜绝信标/
+      // 内网探测通道。开启后直接交给 WebView 加载，重复渲染由浏览器 HTTP
+      // 缓存兜住，不进本地缓存。（CSP img-src 收紧由 Rust 侧任务跟进）
+      if (this.allowRemote) el.src = this.src;
+      else el.dataset.broken = "1";
     } else {
       const key = imageCacheKey(
         imagePathResolver ? imagePathResolver() : null,
@@ -478,7 +504,7 @@ class ImageWidget extends WidgetType {
       // has() 判存而非真值判断：失败路径缓存的是 null（假值），
       // 用 if (cached) 会导致每次装饰重建都重发注定失败的 IPC
       if (imageSrcCache.has(key)) {
-        const cached = imageSrcCache.get(key);
+        const cached = imageCacheGet(key); // 命中续期（LRU）
         if (cached) {
           el.src = cached;
         } else {
@@ -545,22 +571,27 @@ function caretInTable(state, heads, from, to, sticky) {
 }
 
 // 文档编辑落定后，光标是否正停在某个可渲染表格紧邻下方的空行上（Enter 补行）
+// F3：行号预判先行——判断只需要 node.to 与光标所在行号，命中才 parseTable 验证。
+// 旧实现对全文每个 Table 先完整解析再判断，多表大文档每键都要白付一遍全表解析。
 function tableEdgeArrived(state) {
   const arrived = new Set();
-  if (!state.doc.toString().includes("|")) return arrived;
+  if (!docHasPipe(state.doc)) return arrived;
   const heads = state.selection.ranges.map((r) => r.head);
+  if (!heads.length) return arrived;
   syntaxTree(state).iterate({
     enter(node) {
       if (node.name !== "Table") return;
-      if (!parseTable(state, node.node)) return;
       const belowNumber = state.doc.lineAt(node.to).number + 1;
+      let hit = null;
       for (const h of heads) {
         const line = state.doc.lineAt(h);
         if (line.number === belowNumber && !line.text.trim()) {
-          arrived.add(line.from);
+          hit = line;
           break;
         }
       }
+      if (!hit) return; // 光标不在本表紧下方空行：无需解析
+      if (parseTable(state, node.node)) arrived.add(hit.from);
     },
   });
   return arrived;
@@ -588,6 +619,9 @@ function buildDecorations(view) {
   const tableSticky = state.field(tableEdgeSticky, false) || EMPTY_STICKY;
 
   const ranges = [];
+  // 已被代码块头部 widget 占用的 CodeMark 起点：HIDE_MARKS 必须跳过，
+  // 否则同一区间会叠加第二个 replace。
+  const headCodeMarks = new Set();
   // 着重号扫描要避开代码区：可见范围内顺手收集（仅实验开关打开时）
   const codeRanges = [];
   // block widget 已接管的 Table range：其子节点的 replace/line 装饰必须避开，
@@ -651,6 +685,23 @@ function buildDecorations(view) {
                 if (i === cbLines.length - 1) cls.push("cm-cb-last");
                 addLine(line.from, cls.join(" "));
               });
+
+              // 无语言围栏不会产生 CodeInfo。把头部 widget 挂到首个 CodeMark，
+              // 否则 cm-cb-first 只剩约 29px 空档，且没有复制按钮。
+              let hasInfo = false;
+              let firstMark = null;
+              for (let c = node.node.firstChild; c; c = c.nextSibling) {
+                if (c.name === "CodeInfo") hasInfo = true;
+                else if (c.name === "CodeMark" && !firstMark) firstMark = c;
+              }
+              if (!hasInfo && firstMark) {
+                ranges.push(
+                  Decoration.replace({
+                    widget: new CodeHeadWidget("", codeTextOf(state, from, to)),
+                  }).range(firstMark.from, firstMark.to)
+                );
+                headCodeMarks.add(firstMark.from);
+              }
             }
             break;
           }
@@ -672,14 +723,26 @@ function buildDecorations(view) {
             break;
           }
           case "Link": {
-            // Telari 0.5.0：文件链接虚线、网页链接实线
-            const lm = /\]\(([^)\s]+)/.exec(state.doc.sliceString(from, to));
+            // Telari 0.5.0：文件链接虚线、网页链接实线。href 优先取语法树
+            // URL 子节点（正则 `[^)\s]+` 会截断含 `)` 的 URL，仅影响外观分类）
+            let href = "";
+            for (let c = node.node.firstChild; c; c = c.nextSibling) {
+              if (c.name === "URL") {
+                href = state.doc.sliceString(c.from, c.to);
+                break;
+              }
+            }
+            if (!href) {
+              const lm = /\]\(([^)\s]+)/.exec(state.doc.sliceString(from, to));
+              if (lm) href = lm[1];
+            }
+            // 阅读态（光标不在链接里）且真能打开时才给手型；源码态仍用文本光标
+            const openable = !caretIn(from, to) && /^(https?:\/\/|mailto:)/i.test(href);
             ranges.push(
               Decoration.mark({
                 class:
-                  lm && classifyLinkHref(lm[1]) === "file"
-                    ? "cm-link cm-link-file"
-                    : "cm-link",
+                  (classifyLinkHref(href) === "file" ? "cm-link cm-link-file" : "cm-link") +
+                  (openable ? " cm-link-open" : ""),
               }).range(from, to)
             );
             break;
@@ -697,7 +760,22 @@ function buildDecorations(view) {
               }
               break;
             }
-            if (name === "URL") ranges.push(markLink.range(from, to));
+            // F4：<https://x> 尖括号自动链接：尖括号同属脚手架，光标不在链接
+            // 内时折叠。只折 LinkMark——URL 分支保持原样，否则整条链接被折没
+            if (name === "LinkMark" && p && p.name === "Autolink" && !caretIn(p.from, p.to)) {
+              ranges.push(Decoration.replace({}).range(from, to));
+              break;
+            }
+            if (name === "URL") {
+              const openable =
+                !caretIn(from, to) &&
+                /^(https?:\/\/|mailto:)/i.test(state.doc.sliceString(from, to));
+              ranges.push(
+                Decoration.mark({
+                  class: openable ? "cm-link cm-link-open" : "cm-link",
+                }).range(from, to)
+              );
+            }
             break;
           }
           case "Image": {
@@ -706,9 +784,13 @@ function buildDecorations(view) {
               if (parsed) {
                 ranges.push(
                   Decoration.replace({
-                    widget: new ImageWidget(parsed.src, parsed.title),
+                    widget: new ImageWidget(parsed.src, parsed.title, lab.netImages),
                   }).range(from, to)
                 );
+                // 整张图已被 replace 覆盖，不能再让子节点 LinkMark/URL 生成
+                // replace({})：同一区间的重叠装饰在开关驱动重建时会让 CM
+                // 丢弃外层 widget，DOM 只剩空占位，图片从视图消失。
+                return false;
               }
             }
             break;
@@ -814,7 +896,11 @@ function buildDecorations(view) {
 
         // 隐藏标记：仅当光标不在其所属语法节点范围内（表格被 widget 接管时跳过，
         // 单元格内的 EmphasisMark 等会与整表 block replace 重叠）
-        if (HIDE_MARKS.has(name) && !inWidgetTable(from)) {
+        if (
+          HIDE_MARKS.has(name) &&
+          !inWidgetTable(from) &&
+          !headCodeMarks.has(from)
+        ) {
           const parent = node.node.parent;
           const pFrom = parent ? parent.from : from;
           const pTo = parent ? parent.to : to;
@@ -865,8 +951,7 @@ function buildDecorations(view) {
 function buildTableDecorations(state, sticky) {
   const decorations = [];
   const atomicRanges = [];
-  const text = state.doc.toString();
-  if (!text.includes("|")) {
+  if (!docHasPipe(state.doc)) {
     return {
       decorations: RangeSet.of(decorations, true),
       atomic: RangeSet.of(atomicRanges, true),
@@ -1101,6 +1186,8 @@ export const baseTheme = EditorView.theme({
     paddingLeft: "12px",
   },
   ".cm-link": { color: "var(--md-link)", textDecoration: "underline" },
+  // 阅读态、可打开的网页/mailto 链接：悬停手型，提示可单击开浏览器
+  ".cm-link-open": { cursor: "pointer" },
   // 文件链接虚线（Telari 0.5.0）；着重号下加圆点（CSS text-emphasis，WebView 原生支持）
   ".cm-link-file": { textDecoration: "underline dotted" },
   ".cm-em-dot": { textEmphasis: "filled dot", textEmphasisPosition: "under" },

@@ -7,7 +7,38 @@ import {
   tidyText,
   findEmphasisSpans,
   classifyLinkHref,
+  docHasPipe,
+  PROTECTED_NODE_NAMES,
 } from "../src/tidy.js";
+
+test("保护区名单：行内 HTML/注释/处理指令节点必须在内（F1 回归锚）", () => {
+  for (const name of [
+    "FencedCode",
+    "CodeBlock",
+    "InlineCode",
+    "Link",
+    "Image",
+    "AutoLink",
+    "URL",
+    "HTML",
+    "HTMLBlock",
+    "HTMLTag", // 行内 HTML 的真实节点名（GFM）
+    "Comment", // 行内 HTML 注释
+    "ProcessingInstruction",
+  ]) {
+    assert.ok(PROTECTED_NODE_NAMES.has(name), `保护区缺少节点 ${name}`);
+  }
+});
+
+test("保护区语义：名单内的区间整体豁免标点与间距", () => {
+  // 模拟行内 HTML `<span title="中文,属性">文字</span>`：整段保护后原样
+  const html = '<span title="中文,属性">文字</span>';
+  const s = { changes: 0 };
+  assert.equal(tidyText(html, [[0, html.length]], s), html);
+  assert.equal(s.changes, 0);
+  const comment = "<!-- 注释,含中文标点 -->";
+  assert.equal(tidyText(comment, [[0, comment.length]], s), comment);
+});
 
 test("混排间距：CJK 与拉丁/数字交界补空格，已有空格不重复", () => {
   assert.equal(tidyMixedSpacing("中文English中文", []), "中文 English 中文");
@@ -86,4 +117,42 @@ test("classifyLinkHref：网页/文件二分（虚线实线依据）", () => {
   assert.equal(classifyLinkHref("./note.md"), "file");
   assert.equal(classifyLinkHref("../a/b.md"), "file");
   assert.equal(classifyLinkHref("data:image/png;base64,xx"), "web");
+});
+
+test("classifyLinkHref 边角：空串/null/ftp/#anchor（报告漏测项固化）", () => {
+  assert.equal(classifyLinkHref(""), "file");
+  assert.equal(classifyLinkHref(null), "file");
+  assert.equal(classifyLinkHref("ftp://x"), "file");
+  assert.equal(classifyLinkHref("#anchor"), "file");
+});
+
+test("docHasPipe：行迭代短路判定（CM Text 替身）", () => {
+  const mkDoc = (lines) => ({
+    lines: lines.length,
+    line: (n) => ({ text: lines[n - 1] }),
+  });
+  assert.equal(docHasPipe(mkDoc(["ab", "cd"])), false);
+  assert.equal(docHasPipe(mkDoc(["ab", "c|d"])), true);
+  assert.equal(docHasPipe(mkDoc(["|a|b|"])), true);
+  assert.equal(docHasPipe(mkDoc([])), false);
+});
+
+test("全角标点：括号两分支计数 + 连排半角残留原生后果固化（报告漏测项）", () => {
+  const s = { changes: 0 };
+  assert.equal(tidyFullWidthPunct("(中文)外", [], s), "（中文）外");
+  assert.equal(s.changes, 2); // ( 与 ) 各计一次
+  // 连排 `,,`：首个 `,` 的后随字符同为 `,` → 守卫跳过，整段保持半角（守卫的原生行为）
+  assert.equal(tidyFullWidthPunct("中文,,", []), "中文,,");
+  // `.,`：`.` 后随 `,` 非同类 → 转全角；`,` 前驱为原文 `.` 非 CJK → 不转
+  assert.equal(tidyFullWidthPunct("你好.,", []), "你好。,");
+});
+
+test("tidyText 幂等性（报告漏测项固化）", () => {
+  const once = tidyText("中文English文本,混合a,b内容.", []);
+  assert.equal(tidyText(once, []), once);
+});
+
+test("全角标点与拉丁交界不补空格（HAN 类不含全角标点，报告漏测项）", () => {
+  const out = tidyText("中文。English", []);
+  assert.equal(out, "中文。English"); // 。与 E 之间不插空格
 });

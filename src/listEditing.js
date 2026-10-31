@@ -30,6 +30,10 @@ function shiftIndent(state, dispatch, dir) {
     const m = LIST_RE.exec(line.text);
     if (!m) continue;
     const markerStart = m[1].length; // 前缀末尾 = 标记起点
+    // 逐行判代码块：选区跨「代码块→列表」时，块内形如 "- item" 的行不能被
+    // 缩进改写（只查 range.head 会漏掉中间的代码行）。判定点取标记起点
+    // 之后，避免行首位置在节点边界上的歧义
+    if (inCodeBlock(state, Math.min(line.from + markerStart + 1, line.to))) continue;
     if (dir > 0) {
       changes.push({
         from: line.from + markerStart,
